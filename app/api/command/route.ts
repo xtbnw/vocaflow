@@ -1,2 +1,7 @@
-// API boundary for command parsing. Real handlers must delegate outside page code.
-export {};
+import { NextResponse } from "next/server";
+
+export function POST() {
+  return NextResponse.json({
+    status: "not_implemented",
+  });
+}
