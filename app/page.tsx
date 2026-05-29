@@ -1,3 +1,5 @@
+import { LocalStorageRepositorySmoke } from "@/frontend/components/LocalStorageRepositorySmoke";
+
 export default function Home() {
   return (
     <main className="min-h-screen bg-background px-6 py-10 text-foreground">
@@ -24,6 +26,10 @@ export default function Home() {
             <h2 className="text-sm font-medium text-muted-foreground">
               Result Area
             </h2>
+          </div>
+
+          <div className="md:col-span-2">
+            <LocalStorageRepositorySmoke />
           </div>
         </section>
       </div>
