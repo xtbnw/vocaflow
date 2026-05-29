@@ -1,0 +1,10 @@
+{
+  "name": "VocaFlow - Voice Calendar Agent",
+  "short_name": "VocaFlow",
+  "description": "AI-powered voice calendar management",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#000000",
+  "icons": []
+}
