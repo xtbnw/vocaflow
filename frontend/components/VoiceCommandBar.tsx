@@ -54,11 +54,11 @@ export function VoiceCommandBar() {
   const [collapsed, setCollapsed] = useState(false);
   const [collapseCountdown, setCollapseCountdown] = useState<number | null>(null);
   const [isListening, setIsListening] = useState(false);
-  const [voiceSupported] = useState(() => {
-    if (typeof window === "undefined") return false;
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  useEffect(() => {
     const asr = getASRProvider();
-    return asr.isSupported();
-  });
+    setVoiceSupported(asr.isSupported());
+  }, []);
 
   const messageListRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
