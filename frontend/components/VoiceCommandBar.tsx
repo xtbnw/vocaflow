@@ -13,11 +13,13 @@ import {
   ChevronUp,
   ChevronDown,
   Trash2,
+  Clock,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Session, SessionMessage } from "@/backend/domain/sessionTypes";
 import type { OrchestratorResult } from "@/backend/app/commandOrchestrator";
 import type { ToolExecutionResult } from "@/backend/domain/toolExecutionResult";
+import type { PendingAction } from "@/backend/domain/pendingAction";
 import {
   createSession,
   addMessage,
@@ -29,15 +31,19 @@ import { ToolExecutor } from "@/backend/app/toolExecutor";
 import { createDefaultToolRegistry } from "@/backend/domain/toolRegistry";
 import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persistence/localStorageCalendarRepository";
 import { getASRProvider } from "@/backend/infrastructure/asr/asrProviderFactory";
+import { WriteActionPreviewHook } from "@/backend/app/writeActionPreviewHook";
+import { ActionPreviewPanel } from "./ActionPreviewPanel";
 
 export function VoiceCommandBar() {
   const [session, setSession] = useState<Session | null>(null);
-
   const [inputText, setInputText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [collapsed, setCollapsed] = useState(true);
   const [isListening, setIsListening] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [isExecutingPending, setIsExecutingPending] = useState(false);
+
   useEffect(() => {
     const asr = getASRProvider();
     setVoiceSupported(asr.isSupported());
@@ -50,6 +56,7 @@ export function VoiceCommandBar() {
     const repo = new LocalStorageCalendarRepository();
     const registry = createDefaultToolRegistry(repo);
     executorRef.current = new ToolExecutor(registry, repo);
+    executorRef.current.registerBeforeExecuteHook(new WriteActionPreviewHook());
   }
 
   const asrRef = useRef<ReturnType<typeof getASRProvider>>(null);
@@ -66,6 +73,7 @@ export function VoiceCommandBar() {
   const clearSession = useCallback(() => {
     setSession(null);
     setCollapsed(true);
+    setPendingAction(null);
   }, []);
 
   // wire ASR callbacks
@@ -109,7 +117,7 @@ export function VoiceCommandBar() {
 
     const userMsg = makeUserMessage(text);
     let cur = session ?? createSession();
-    const history = cur.messages; // messages before this one
+    const history = cur.messages;
     cur = addMessage(cur, userMsg);
     setSession(cur);
 
@@ -178,16 +186,32 @@ export function VoiceCommandBar() {
             data.tool,
             data.arguments,
           );
-          const toolMsg = makeToolMessage(
-            data.tool,
-            data.arguments as Record<string, unknown>,
-            execResult.success,
-            execResult.message,
-          );
-          cur = addMessage(cur, toolMsg);
 
-          if (execResult.success) {
-            window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
+          if (execResult.kind === "pending_action") {
+            executorRef.current!.storePendingAction(execResult.pendingAction);
+            setPendingAction(execResult.pendingAction);
+
+            const toolMsg = makeToolMessage(
+              data.tool,
+              data.arguments as Record<string, unknown>,
+              true,
+              execResult.message,
+            );
+            cur = addMessage(cur, toolMsg);
+          } else {
+            const toolMsg = makeToolMessage(
+              data.tool,
+              data.arguments as Record<string, unknown>,
+              execResult.success,
+              execResult.message,
+            );
+            cur = addMessage(cur, toolMsg);
+
+            if (execResult.success) {
+              window.dispatchEvent(
+                new CustomEvent("vocaflow:events-changed"),
+              );
+            }
           }
         } catch {
           const toolMsg = makeToolMessage(
@@ -205,22 +229,94 @@ export function VoiceCommandBar() {
     }
   }
 
+  async function handleConfirmPending() {
+    if (!pendingAction || isExecutingPending) return;
+
+    setIsExecutingPending(true);
+    const actionId = pendingAction.id;
+    const toolLabelText = toolLabel(pendingAction.type);
+
+    try {
+      const execResult = await executorRef.current!.executePendingAction(actionId);
+
+      if (execResult.kind === "execution") {
+        const toolMsg = makeToolMessage(
+          pendingAction.type,
+          pendingAction.payload as Record<string, unknown>,
+          execResult.success,
+          execResult.message,
+        );
+
+        if (execResult.success) {
+          window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
+        }
+
+        setSession((s) => (s ? addMessage(s, toolMsg) : s));
+      }
+    } catch {
+      const toolMsg = makeToolMessage(
+        pendingAction.type,
+        pendingAction.payload as Record<string, unknown>,
+        false,
+        "确认执行失败",
+      );
+      setSession((s) => (s ? addMessage(s, toolMsg) : s));
+    } finally {
+      setPendingAction(null);
+      setIsExecutingPending(false);
+    }
+  }
+
+  function handleCancelPending() {
+    if (!pendingAction || isExecutingPending) return;
+
+    executorRef.current!.cancelPendingAction(pendingAction.id);
+
+    const toolMsg = makeToolMessage(
+      pendingAction.type,
+      pendingAction.payload as Record<string, unknown>,
+      false,
+      "操作已取消",
+    );
+    setSession((s) => (s ? addMessage(s, toolMsg) : s));
+    setPendingAction(null);
+  }
+
   const messages = session?.messages ?? [];
   const hasMessages = messages.length > 0;
   const latestMessage = hasMessages ? messages[messages.length - 1] : null;
 
   return (
     <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-50 flex flex-col items-center gap-2 px-4 pb-4">
-      {/* expanded: all messages */}
+      {/* expanded: all messages + optional preview panel */}
       {hasMessages && !collapsed && (
-        <div className="pointer-events-auto mb-2 flex w-full max-w-[760px] flex-col">
-          <div
-            className="vf-glass max-h-[40vh] overflow-y-auto rounded-2xl border border-white/30 p-3 shadow-sm"
-            ref={messageListRef}
-          >
-            {messages.map((msg) => (
-              <MessageBubble key={msg.id} message={msg} />
-            ))}
+        <div
+          className={`pointer-events-auto mb-2 flex w-full flex-col ${
+            pendingAction ? "max-w-[1100px]" : "max-w-[760px]"
+          }`}
+        >
+          <div className={`flex gap-4 ${pendingAction ? "flex-row" : "flex-col"}`}>
+            <div className="min-w-0 flex-1">
+              <div
+                className="vf-glass max-h-[40vh] overflow-y-auto rounded-2xl border border-white/30 p-3 shadow-sm"
+                ref={messageListRef}
+              >
+                {messages.map((msg) => (
+                  <MessageBubble key={msg.id} message={msg} />
+                ))}
+              </div>
+            </div>
+
+            {pendingAction && (
+              <div className="w-[320px] shrink-0">
+                <ActionPreviewPanel
+                  pendingAction={pendingAction}
+                  onConfirm={handleConfirmPending}
+                  onCancel={handleCancelPending}
+                  disabled={isExecutingPending}
+                />
+              </div>
+            )}
           </div>
 
           {/* action bar */}
@@ -243,12 +339,27 @@ export function VoiceCommandBar() {
         </div>
       )}
 
-      {/* collapsed: latest message only */}
+      {/* collapsed: latest message + pending indicator */}
       {hasMessages && collapsed && (
         <div className="pointer-events-auto mb-2 flex w-full max-w-[760px] flex-col">
           <div className="vf-glass rounded-2xl border border-white/30 p-3 shadow-sm">
             <MessageBubble message={latestMessage!} />
           </div>
+
+          {pendingAction && (
+            <div className="mt-2 flex items-center gap-2 rounded-xl bg-[#fff9e6]/90 px-4 py-2 text-xs text-[#625f50] backdrop-blur-sm">
+              <Clock className="h-3.5 w-3.5" />
+              <span>
+                有待确认的{pendingAction.type === "create_event" ? "创建" : "删除"}操作
+              </span>
+              <button
+                className="ml-auto rounded-full bg-[#e8f5e9] px-3 py-1 text-xs font-medium text-[#2e7d32] transition-colors hover:bg-[#c8e6c9]"
+                onClick={() => setCollapsed(false)}
+              >
+                查看
+              </button>
+            </div>
+          )}
 
           {/* action bar */}
           <div className="mt-2 flex items-center justify-between rounded-xl bg-[#f6f3f2]/90 px-4 py-2 text-xs text-[#49473f] backdrop-blur-sm">
@@ -468,6 +579,8 @@ function toolLabel(tool: string): string {
       return "查询日程";
     case "find_events_for_delete":
       return "查找待删除日程";
+    case "delete_event":
+      return "删除日程";
     default:
       return tool;
   }
