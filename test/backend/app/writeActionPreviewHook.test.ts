@@ -73,7 +73,7 @@ test("adds a warning when an existing event overlaps the candidate", async () =>
   );
 
   assert.deepEqual(preview.warnings, [
-    "时间冲突：15:00-16:00 已有“数据库验收准备”",
+    '时间冲突：15:00-16:00 已有"数据库验收准备"',
   ]);
 });
 
@@ -94,7 +94,7 @@ test("uses the one hour default duration when checking conflicts", async () => {
 
   assert.deepEqual(preview.warnings, [
     "未指定结束时间，将默认设置为开始时间后 1 小时",
-    "时间冲突：15:00-16:00 已有“数据库验收准备”",
+    '时间冲突：15:00-16:00 已有"数据库验收准备"',
   ]);
 });
 

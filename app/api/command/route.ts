@@ -3,7 +3,6 @@ import { serverAgentRunner } from "@/backend/bootstrap/serverAgentRuntime";
 import { createParserContext } from "@/backend/app/serverApiHelpers";
 import { makeUserMessage } from "@/backend/app/sessionManager";
 import { sessionStore } from "@/backend/app/sessionStore";
-import type { SessionMessage } from "@/backend/domain/sessionTypes";
 
 export async function POST(request: NextRequest) {
   let body: Record<string, unknown>;
@@ -19,12 +18,10 @@ export async function POST(request: NextRequest) {
   }
 
   const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
-  const { session, isNew } = sessionStore.getOrCreate(sessionId);
+  const { session } = sessionStore.getOrCreate(sessionId);
 
   const userMsg = makeUserMessage(text);
-  sessionStore.addMessage(session.id, userMsg);
-
-  const priorHistory = sessionStore.getMessages(session.id).slice(0, -1);
+  const priorHistory = sessionStore.getMessages(session.id);
 
   const result = await serverAgentRunner.runUserMessage(
     userMsg,

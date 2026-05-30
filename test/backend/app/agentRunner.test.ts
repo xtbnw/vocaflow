@@ -7,7 +7,17 @@ import { WriteActionPreviewHook } from "../../../backend/app/writeActionPreviewH
 import type { OrchestratorResult } from "../../../backend/app/commandOrchestrator";
 import type { CalendarRepository } from "../../../backend/domain/calendarRepository";
 import type { CalendarEvent } from "../../../backend/domain/calendarTypes";
-import { createDefaultToolRegistry } from "../../../backend/domain/toolRegistry";
+import { ToolRegistry } from "../../../backend/domain/toolRegistry";
+import {
+  CreateEventArgsSchema,
+  DeleteEventArgsSchema,
+  QueryEventsArgsSchema,
+} from "../../../backend/domain/calendarTypes";
+import {
+  createEventHandler,
+  queryEventsHandler,
+  deleteEventHandler,
+} from "../../../backend/app/calendarToolHandlers";
 import { makeUserMessage } from "../../../backend/app/sessionManager";
 
 class MemoryCalendarRepository implements CalendarRepository {
@@ -53,7 +63,10 @@ function createRunner(
   repository: CalendarRepository,
   results: OrchestratorResult[],
 ) {
-  const registry = createDefaultToolRegistry(repository);
+  const registry = new ToolRegistry();
+  registry.register({ name: "create_event", schema: CreateEventArgsSchema, handler: createEventHandler(repository) });
+  registry.register({ name: "query_events", schema: QueryEventsArgsSchema, handler: queryEventsHandler(repository) });
+  registry.register({ name: "delete_event", schema: DeleteEventArgsSchema, handler: deleteEventHandler(repository) });
   const executor = new ToolExecutor(registry);
   executor.registerBeforeExecuteHook(new WriteActionPreviewHook(repository));
   const orchestrator = new QueuedOrchestrator(results);

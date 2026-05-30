@@ -11,9 +11,12 @@ npm start         # 启动生产服务
 npm run lint      # ESLint 检查
 ```
 
-尚无测试，后续添加后在此补充测试命令。
+```bash
+npm test              # 运行确定性单元测试 (不访问网络, tsx + node:test)
+npm run test:integration  # 运行真实 LLM 集成测试 (需要 DEEPSEEK_API_KEY)
+```
 
-交付前至少运行 `npm run build`，除非用户明确要求跳过验证。
+交付前至少运行 `npm test && npm run build`，除非用户明确要求跳过验证。
 
 ## 开发流程
 
@@ -55,6 +58,7 @@ app/                     # Next.js App Router 页面和路由
     command/route.ts     # POST — 文本/语音指令入口 (sessionId + text)
     command/confirm/     # POST — 确认待处理操作 (sessionId + pendingActionId)
     command/cancel/      # POST — 取消待处理操作 (sessionId + pendingActionId)
+    session/route.ts     # DELETE — 清除服务端 Session
     events/route.ts      # GET — 获取所有日程
 frontend/
   api/
@@ -86,7 +90,8 @@ backend/
     writeActionPreviewHook.ts # 写操作拦截 → 冲突检测 → PendingAction
     sessionManager.ts     # Session / Message 工厂函数
     sessionStore.ts       # 服务端内存 Session Store
-    serverApiHelpers.ts   # parseHistory, createParserContext
+    serverApiHelpers.ts   # createParserContext
+    parserUtils.ts       # extractJson, describeSchemaForPrompt (通用解析工具)
     ports/
       commandParser.ts    # CommandParser 接口 (ParserContext)
     types/

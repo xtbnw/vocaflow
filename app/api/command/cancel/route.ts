@@ -27,6 +27,7 @@ export async function POST(request: NextRequest) {
   const result = serverAgentRunner.cancelPendingAction(pendingActionId, history);
 
   sessionStore.removePendingAction(sessionId, pendingActionId);
+  serverAgentRunner.removePendingAction(pendingActionId);
 
   const storedIds = new Set(history.map((m) => m.id));
   for (const msg of result.messages) {

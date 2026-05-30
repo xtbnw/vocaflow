@@ -7,7 +7,7 @@ import type { CommandParser, ParserContext } from "./ports/commandParser";
 import {
   extractJson,
   describeSchemaForPrompt,
-} from "../infrastructure/parser/llmCommandParser";
+} from "./parserUtils";
 
 export type OrchestratorResult =
   | { kind: "chat"; message: string }

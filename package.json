@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "npx tsx --test test/backend/**/*.test.ts",
+    "test:integration": "npx tsx --test test/integration/**/*.test.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.10.0",
@@ -28,6 +30,7 @@
     "eslint": "^9.16.0",
     "eslint-config-next": "^15.1.0",
     "tailwindcss": "^4.0.0",
+    "tsx": "^4.22.3",
     "typescript": "^5.7.0"
   }
 }

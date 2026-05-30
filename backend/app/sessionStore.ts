@@ -1,5 +1,4 @@
-import type { Session, SessionMessage, UserMessage } from "../domain/sessionTypes";
-import type { PendingAction } from "./types/pendingAction";
+import type { Session, SessionMessage } from "../domain/sessionTypes";
 import { createSession, addMessage } from "./sessionManager";
 
 /**
@@ -7,7 +6,7 @@ import { createSession, addMessage } from "./sessionManager";
  * Sessions survive process restart only in the sense that they're re-created
  * on the next request. Lifecycle is tied to the Node.js process.
  */
-class SessionStore {
+export class SessionStore {
   private readonly sessions = new Map<string, Session>();
   // sessionId -> Set<pendingActionId>
   private readonly pendingActions = new Map<string, Set<string>>();
@@ -50,6 +49,14 @@ class SessionStore {
 
   removePendingAction(sessionId: string, pendingActionId: string): void {
     this.pendingActions.get(sessionId)?.delete(pendingActionId);
+  }
+
+  /** 删除 Session，返回该 Session 绑定的所有 PendingAction ID */
+  deleteSession(sessionId: string): string[] {
+    this.sessions.delete(sessionId);
+    const ids = [...(this.pendingActions.get(sessionId) ?? [])];
+    this.pendingActions.delete(sessionId);
+    return ids;
   }
 }
 

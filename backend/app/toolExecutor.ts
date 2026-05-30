@@ -111,6 +111,10 @@ export class ToolExecutor {
     return true;
   }
 
+  removePendingAction(id: string): void {
+    this.pendingActions.delete(id);
+  }
+
   private formatMessage(tool: string, data: unknown): string {
     return formatToolResult(tool, data);
   }

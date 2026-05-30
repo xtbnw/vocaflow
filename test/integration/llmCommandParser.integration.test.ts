@@ -1,12 +1,27 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import type { LLMProvider, ChatMessage } from "../../../../backend/domain/llmProvider";
-import { LLMCommandParser } from "../../../../backend/infrastructure/parser/llmCommandParser";
+import { test, after } from "node:test";
+import type { LLMProvider, ChatMessage } from "../../backend/domain/llmProvider";
+import { DeepSeekProvider } from "../../backend/infrastructure/llm/deepseekProvider";
+import { LLMCommandParser } from "../../backend/infrastructure/parser/llmCommandParser";
 import {
   CreateEventArgsSchema,
   QueryEventsArgsSchema,
   DeleteEventArgsSchema,
-} from "../../../../backend/domain/calendarTypes";
+} from "../../backend/domain/calendarTypes";
+
+// 加载 .env.local
+const envPath = resolve(import.meta.dirname!, "..", "..", ".env.local");
+try {
+  const envContent = readFileSync(envPath, "utf-8");
+  for (const line of envContent.split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) process.env[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+  }
+} catch {
+  // .env.local 不存在时跳过
+}
 
 const tools = [
   { name: "create_event", schema: CreateEventArgsSchema, handler: async () => {} },
@@ -19,90 +34,70 @@ const context = {
   timezone: "Asia/Shanghai",
 };
 
-function mockProvider(response: string | ((messages: ChatMessage[]) => string)): LLMProvider {
+function makeProvider(): LLMProvider {
+  if (process.env.DEEPSEEK_API_KEY) {
+    return DeepSeekProvider.fromEnv();
+  }
   return {
     config: { url: "", apiKey: "", model: "mock" },
-    async chat(messages: ChatMessage[]) {
-      return typeof response === "function" ? response(messages) : response;
+    async chat(_messages: ChatMessage[]) {
+      return JSON.stringify({
+        kind: "tool_call",
+        tool: "query_events",
+        arguments: { rangeStartAt: "2026-06-01T00:00:00+08:00", rangeEndAt: "2026-06-07T23:59:59+08:00" },
+        confidence: 0.9,
+      });
     },
   };
 }
 
+after(() => {
+  delete process.env.DEEPSEEK_API_KEY;
+});
+
 test("parse: create_event with missing endAt → clarification", async () => {
-  const parser = new LLMCommandParser(mockProvider(JSON.stringify({
-    kind: "clarification",
-    clarificationQuestion: "请问会议几点结束？",
-    missingFields: ["endAt"],
-  })));
+  const llm = makeProvider();
+  const parser = new LLMCommandParser(llm);
 
   const result = await parser.parse("明天下午3点开会讨论项目进度", context, tools);
   assert.equal(result.kind, "clarification");
 });
 
 test("parse: query_events for next week → tool_call", async () => {
-  const parser = new LLMCommandParser(mockProvider(JSON.stringify({
-    kind: "tool_call",
-    tool: "query_events",
-    arguments: {
-      rangeStartAt: "2026-06-01T00:00:00+08:00",
-      rangeEndAt: "2026-06-07T23:59:59+08:00",
-    },
-    confidence: 0.9,
-  })));
+  const llm = makeProvider();
+  const parser = new LLMCommandParser(llm);
 
   const result = await parser.parse("下周有什么安排", context, tools);
   assert.equal(result.kind, "tool_call");
 });
 
 test("parse: chat greeting → chat", async () => {
-  const parser = new LLMCommandParser(mockProvider(JSON.stringify({
-    kind: "chat",
-    message: "你好！有什么可以帮助你的？",
-  })));
+  const llm = makeProvider();
+  const parser = new LLMCommandParser(llm);
 
   const result = await parser.parse("你好", context, tools);
   assert.equal(result.kind, "chat");
 });
 
 test("parse: nonsense → unknown", async () => {
-  const parser = new LLMCommandParser(mockProvider(JSON.stringify({
-    kind: "unknown",
-    reason: "无法理解输入内容",
-  })));
+  const llm = makeProvider();
+  const parser = new LLMCommandParser(llm);
 
   const result = await parser.parse("asdfghjkl", context, tools);
   assert.equal(result.kind, "unknown");
 });
 
 test("parse: delete_event via multi-step → tool_call or clarification", async () => {
-  // LLM should respond with query_events first (2-step deletion pattern)
-  const parser = new LLMCommandParser(mockProvider(JSON.stringify({
-    kind: "tool_call",
-    tool: "query_events",
-    arguments: {
-      rangeStartAt: "2026-05-31T00:00:00+08:00",
-      rangeEndAt: "2026-05-31T23:59:59+08:00",
-      keyword: "开会讨论项目进度",
-    },
-    confidence: 0.95,
-  })));
+  const llm = makeProvider();
+  const parser = new LLMCommandParser(llm);
 
   const result = await parser.parse("删除明天下午3点开会讨论项目进度的日程", context, tools);
   assert.notEqual(result.kind, "unknown");
 });
 
 test("parse: with session history maintains context", async () => {
-  const parser = new LLMCommandParser(mockProvider(JSON.stringify({
-    kind: "tool_call",
-    tool: "create_event",
-    arguments: {
-      title: "和张三开会",
-      startAt: "2026-05-31T15:00:00+08:00",
-      endAt: "2026-05-31T16:00:00+08:00",
-      location: "会议室 A",
-    },
-    confidence: 0.9,
-  })));
+  const llm = makeProvider();
+  const parser = new LLMCommandParser(llm);
 
   const history = [
     {

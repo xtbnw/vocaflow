@@ -83,7 +83,7 @@ export default function SchedulesPage() {
                 <article key={event.id} className="vf-glass rounded-lg p-6 md:flex md:items-center md:gap-4">
                   <div className="mb-4 shrink-0 md:mb-0 md:w-32">
                     <span className="block text-xs font-medium uppercase tracking-widest text-[#49473f]">
-                      {String(startTime.getHours()).padStart(2, "0")}:{String(startTime.getMinutes()).padStart(2, "0")} AM
+                      {String(startTime.getHours()).padStart(2, "0")}:{String(startTime.getMinutes()).padStart(2, "0")}
                     </span>
                     <span className="text-xs font-medium uppercase tracking-widest text-[#5f5f58]">{durationLabel}</span>
                   </div>

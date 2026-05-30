@@ -74,11 +74,14 @@ export function useAgentSession(
     }
   }, [pendingAction, sessionId, isExecutingPending, onEventsChanged]);
 
-  const clearSession = useCallback(() => {
+  const clearSession = useCallback(async () => {
+    if (sessionId) {
+      void fetch(`/api/session?id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    }
     setSessionId(null);
     setMessages([]);
     setPendingAction(null);
-  }, []);
+  }, [sessionId]);
 
   return {
     sessionId,

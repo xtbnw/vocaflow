@@ -29,6 +29,7 @@ function getDatabasePath(): string {
 
 let _agentRunner: AgentRunner | undefined;
 let _calendarRepository: SQLiteCalendarRepository | undefined;
+let _toolExecutor: ToolExecutor | undefined;
 
 function init() {
   if (_agentRunner && _calendarRepository) {
@@ -47,6 +48,7 @@ function init() {
   registry.register({ name: "delete_event", schema: DeleteEventArgsSchema, handler: deleteEventHandler(repository) });
 
   const executor = new ToolExecutor(registry);
+  _toolExecutor = executor;
   executor.registerBeforeExecuteHook(new WriteActionPreviewHook(repository));
 
   const llm = getLLMProvider();
@@ -86,6 +88,10 @@ export const serverAgentRunner = {
     history: Parameters<AgentRunner["cancelPendingAction"]>[1],
   ) {
     return getAgentRunner().cancelPendingAction(pendingActionId, history);
+  },
+  removePendingAction(pendingActionId: string) {
+    init();
+    _toolExecutor!.removePendingAction(pendingActionId);
   },
 };
 
