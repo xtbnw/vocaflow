@@ -33,6 +33,7 @@ export interface ToolMessage {
   arguments: Record<string, unknown>;
   success: boolean;
   message: string;
+  data?: unknown;
   timestamp: string;
 }
 
@@ -72,6 +73,7 @@ export const ToolMessageSchema = z.object({
   arguments: z.record(z.string(), z.unknown()),
   success: z.boolean(),
   message: z.string(),
+  data: z.unknown().optional(),
   timestamp: z.string(),
 });
 

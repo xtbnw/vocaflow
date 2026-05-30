@@ -75,7 +75,7 @@ export class ToolRegistry {
   }
 }
 
-// -- Real handlers (client-side, with CalendarRepository) --
+// -- Real handlers (with CalendarRepository) --
 
 function newId(): string {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {

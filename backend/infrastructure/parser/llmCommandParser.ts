@@ -53,7 +53,7 @@ You may chain multiple tool calls to complete a complex request. After a tool ex
    d. If query_events returns no events, output "finish" saying no matching events were found.
 3. When the user's request is fully satisfied, output "finish" with a natural summary message in the user's language.
 4. Do NOT repeat a tool call that was just executed with identical arguments — this would cause an infinite loop.
-5. If the current user message is "请继续" (continue signal), review the last [Tool Result] and determine the next appropriate action to complete the user's original request.
+5. After receiving a [Tool Result], review it and determine the next appropriate action to complete the user's original request.
 
 ## Task
 Classify the user's input into one of five kinds. Consider ALL conversation history — user messages, assistant intent markers, AND tool execution results — when interpreting the current message. Output ONLY the JSON — no markdown, no backticks, no explanations.
@@ -132,12 +132,14 @@ export function buildMessages(
     } else if (msg.kind === "tool") {
       messages.push({
         role: "user",
-        content: `[Tool Result: ${msg.toolName} — ${msg.success ? "success" : "failed"}]\n${msg.message}`,
+        content: `[Tool Result: ${msg.toolName} — ${msg.success ? "success" : "failed"}]\n${msg.message}\nData: ${JSON.stringify(msg.data ?? null)}`,
       });
     }
   }
 
-  messages.push({ role: "user", content: currentText });
+  if (currentText.trim()) {
+    messages.push({ role: "user", content: currentText });
+  }
 
   return messages;
 }

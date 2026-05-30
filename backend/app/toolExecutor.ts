@@ -1,4 +1,3 @@
-import type { CalendarRepository } from "../domain/calendarRepository";
 import type { ToolRegistry } from "../domain/toolRegistry";
 import type { ToolExecutionResult } from "../domain/toolExecutionResult";
 import type { CalendarEvent } from "../domain/calendarTypes";
@@ -12,10 +11,7 @@ export class ToolExecutor {
   private readonly beforeHooks: BeforeToolExecuteHook[] = [];
   private readonly pendingActions = new Map<string, PendingAction>();
 
-  constructor(
-    private readonly registry: ToolRegistry,
-    private readonly repository: CalendarRepository,
-  ) {}
+  constructor(private readonly registry: ToolRegistry) {}
 
   registerBeforeExecuteHook(hook: BeforeToolExecuteHook): void {
     this.beforeHooks.push(hook);

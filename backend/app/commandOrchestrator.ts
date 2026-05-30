@@ -176,7 +176,7 @@ If B:
     } else if (msg.kind === "tool") {
       messages.push({
         role: "user",
-        content: `[Tool Result: ${msg.toolName} — ${msg.success ? "success" : "failed"}]\n${msg.message}`,
+        content: `[Tool Result: ${msg.toolName} — ${msg.success ? "success" : "failed"}]\n${msg.message}\nData: ${JSON.stringify(msg.data ?? null)}`,
       });
     }
   }

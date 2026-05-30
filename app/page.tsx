@@ -2,7 +2,6 @@
 
 import { buildMonthGrid } from "@/frontend/components/calendar/buildMonthGrid";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persistence/localStorageCalendarRepository";
 import type { CalendarEvent } from "@/backend/domain/calendarTypes";
 
 type ViewName = "year" | "month" | "day";
@@ -28,13 +27,10 @@ export default function Home() {
   const [displayMonthIndex, setDisplayMonthIndex] = useState(initialMonthIndex);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
 
-  const repoRef = useRef<LocalStorageCalendarRepository | null>(null);
-  if (!repoRef.current) {
-    repoRef.current = new LocalStorageCalendarRepository();
-  }
-
   const loadEvents = () => {
-    repoRef.current!.list().then(setEvents);
+    fetch("/api/events")
+      .then((response) => response.json())
+      .then((data: { events: CalendarEvent[] }) => setEvents(data.events));
   };
 
   useEffect(() => {

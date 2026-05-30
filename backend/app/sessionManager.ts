@@ -71,6 +71,7 @@ export function makeToolMessage(
   args: Record<string, unknown>,
   success: boolean,
   message: string,
+  data?: unknown,
 ): ToolMessage {
   return {
     kind: "tool",
@@ -79,6 +80,7 @@ export function makeToolMessage(
     arguments: args,
     success,
     message,
+    data,
     timestamp: new Date().toISOString(),
   };
 }

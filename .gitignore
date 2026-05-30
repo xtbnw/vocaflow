@@ -13,6 +13,10 @@
 # production
 /build
 
+# runtime data
+/data/*.sqlite
+/data/*.sqlite-*
+
 # misc
 .DS_Store
 *.pem

@@ -17,21 +17,15 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Session, SessionMessage } from "@/backend/domain/sessionTypes";
-import type { OrchestratorResult } from "@/backend/app/commandOrchestrator";
-import type { ToolExecutionResult } from "@/backend/domain/toolExecutionResult";
+import type { AgentRunResult } from "@/backend/app/agentRunner";
 import type { PendingAction } from "@/backend/domain/pendingAction";
 import {
   createSession,
   addMessage,
   makeUserMessage,
   makeAssistantMessage,
-  makeToolMessage,
 } from "@/backend/app/sessionManager";
-import { ToolExecutor } from "@/backend/app/toolExecutor";
-import { createDefaultToolRegistry } from "@/backend/domain/toolRegistry";
-import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persistence/localStorageCalendarRepository";
 import { getASRProvider } from "@/backend/infrastructure/asr/asrProviderFactory";
-import { WriteActionPreviewHook } from "@/backend/app/writeActionPreviewHook";
 import { ActionPreviewPanel } from "./ActionPreviewPanel";
 
 export function VoiceCommandBar() {
@@ -44,26 +38,12 @@ export function VoiceCommandBar() {
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [isExecutingPending, setIsExecutingPending] = useState(false);
 
-  const MAX_REACT_ITERATIONS = 20;
-  const sessionRef = useRef<Session | null>(null);
-  useEffect(() => {
-    sessionRef.current = session;
-  }, [session]);
-
   useEffect(() => {
     const asr = getASRProvider();
     setVoiceSupported(asr.isSupported());
   }, []);
 
   const messageListRef = useRef<HTMLDivElement>(null);
-
-  const executorRef = useRef<ToolExecutor | null>(null);
-  if (!executorRef.current) {
-    const repo = new LocalStorageCalendarRepository();
-    const registry = createDefaultToolRegistry(repo);
-    executorRef.current = new ToolExecutor(registry, repo);
-    executorRef.current.registerBeforeExecuteHook(new WriteActionPreviewHook(repo));
-  }
 
   const asrRef = useRef<ReturnType<typeof getASRProvider>>(null);
   if (!asrRef.current) {
@@ -112,16 +92,32 @@ export function VoiceCommandBar() {
     };
   }, []);
 
-  async function callOrchestrator(
-    text: string,
-    history: readonly SessionMessage[],
-  ): Promise<OrchestratorResult> {
-    const res = await fetch("/api/command", {
+  async function callAgent(
+    path: string,
+    body: Record<string, unknown>,
+  ): Promise<AgentRunResult> {
+    const res = await fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, messages: history }),
+      body: JSON.stringify(body),
     });
-    return (await res.json()) as OrchestratorResult;
+    if (!res.ok) throw new Error("Agent request failed");
+    return (await res.json()) as AgentRunResult;
+  }
+
+  function applyAgentResult(
+    currentSession: Session,
+    result: AgentRunResult,
+  ): Session {
+    setPendingAction(result.pendingAction ?? null);
+    if (result.eventsChanged) {
+      window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
+    }
+    return {
+      ...currentSession,
+      messages: result.messages,
+      updatedAt: new Date().toISOString(),
+    };
   }
 
   const submitText = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -138,12 +134,13 @@ export function VoiceCommandBar() {
     const history = cur.messages;
     cur = addMessage(cur, userMsg);
     setSession(cur);
-    sessionRef.current = cur;
 
     try {
-      const data = await callOrchestrator(text, cur.messages);
-      const finalSession = await handleOrchestratorResult(data, cur, text);
-      setSession(finalSession);
+      const result = await callAgent("/api/command", {
+        message: userMsg,
+        messages: history,
+      });
+      setSession(applyAgentResult(cur, result));
     } catch {
       const errMsg = makeAssistantMessage("请求失败，请稍后重试", "unknown");
       setSession((s) => (s ? addMessage(s, errMsg) : s));
@@ -152,181 +149,42 @@ export function VoiceCommandBar() {
     }
   };
 
-  async function handleOrchestratorResult(
-    data: OrchestratorResult,
-    currentSession: Session,
-    userText: string,
-    iteration = 0,
-  ): Promise<Session> {
-    if (iteration >= MAX_REACT_ITERATIONS) return currentSession;
-
-    switch (data.kind) {
-      case "finish":
-      case "chat": {
-        const msg = makeAssistantMessage(data.message, data.kind === "finish" ? "finish" : "chat");
-        return addMessage(currentSession, msg);
-      }
-      case "clarification": {
-        const msg = makeAssistantMessage(
-          data.clarificationQuestion,
-          "clarification",
-        );
-        return addMessage(currentSession, msg);
-      }
-      case "unknown": {
-        const msg = makeAssistantMessage(
-          data.reason ?? "未能理解您的意图",
-          "unknown",
-        );
-        return addMessage(currentSession, msg);
-      }
-      case "error": {
-        const msg = makeAssistantMessage(data.message, "unknown");
-        return addMessage(currentSession, msg);
-      }
-      case "tool_call": {
-        const assistantMsg = makeAssistantMessage(
-          `正在执行${toolLabel(data.tool)}…`,
-          "tool_call",
-          data.tool,
-          data.arguments as Record<string, unknown>,
-        );
-        let cur = addMessage(currentSession, assistantMsg);
-
-        try {
-          const execResult: ToolExecutionResult = await executorRef.current!.execute(
-            data.tool,
-            data.arguments,
-          );
-
-          if (execResult.kind === "pending_action") {
-            executorRef.current!.storePendingAction(execResult.pendingAction);
-            setPendingAction(execResult.pendingAction);
-
-            const toolMsg = makeToolMessage(
-              data.tool,
-              data.arguments as Record<string, unknown>,
-              true,
-              execResult.message,
-            );
-            cur = addMessage(cur, toolMsg);
-            // Pause ReAct loop — wait for user confirmation
-            return cur;
-          }
-
-          const toolMsg = makeToolMessage(
-            data.tool,
-            data.arguments as Record<string, unknown>,
-            execResult.success,
-            execResult.message,
-          );
-          cur = addMessage(cur, toolMsg);
-
-          if (execResult.success) {
-            window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
-          }
-
-          // Continue ReAct loop
-          const continueData = await callOrchestrator("请继续", cur.messages);
-          return handleOrchestratorResult(continueData, cur, userText, iteration + 1);
-        } catch {
-          const toolMsg = makeToolMessage(
-            data.tool,
-            data.arguments as Record<string, unknown>,
-            false,
-            "工具执行失败",
-          );
-          return addMessage(cur, toolMsg);
-        }
-      }
-    }
-  }
-
   async function handleConfirmPending() {
-    if (!pendingAction || isExecutingPending) return;
+    if (!pendingAction || !session || isExecutingPending) return;
 
     setIsExecutingPending(true);
-    const actionId = pendingAction.id;
-    const actionType = pendingAction.type;
-    const actionPayload = pendingAction.payload;
 
     try {
-      const execResult = await executorRef.current!.executePendingAction(actionId);
-
-      if (execResult.kind === "execution") {
-        const toolMsg = makeToolMessage(
-          actionType,
-          actionPayload as Record<string, unknown>,
-          execResult.success,
-          execResult.message,
-        );
-
-        if (execResult.success) {
-          window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
-        }
-
-        setPendingAction(null);
-
-        // Resume ReAct loop after pending action resolves
-        setSession((s) => {
-          if (!s) return s;
-          const updated = addMessage(s, toolMsg);
-          sessionRef.current = updated;
-
-          callOrchestrator("请继续", updated.messages)
-            .then((continueData) =>
-              handleOrchestratorResult(continueData, updated, actionType),
-            )
-            .then((finalSession) => setSession(finalSession))
-            .catch(() => {});
-
-          return updated;
-        });
-      } else {
-        setPendingAction(null);
-      }
+      const result = await callAgent("/api/command/confirm", {
+        pendingActionId: pendingAction.id,
+        messages: session.messages,
+      });
+      setSession(applyAgentResult(session, result));
     } catch {
-      const toolMsg = makeToolMessage(
-        actionType,
-        actionPayload as Record<string, unknown>,
-        false,
-        "确认执行失败",
-      );
-      setSession((s) => (s ? addMessage(s, toolMsg) : s));
+      const errMsg = makeAssistantMessage("确认执行失败", "unknown");
+      setSession(addMessage(session, errMsg));
       setPendingAction(null);
     } finally {
       setIsExecutingPending(false);
     }
   }
 
-  function handleCancelPending() {
-    if (!pendingAction || isExecutingPending) return;
+  async function handleCancelPending() {
+    if (!pendingAction || !session || isExecutingPending) return;
 
-    const actionType = pendingAction.type;
-    const actionPayload = pendingAction.payload;
-    executorRef.current!.cancelPendingAction(pendingAction.id);
-
-    const toolMsg = makeToolMessage(
-      actionType,
-      actionPayload as Record<string, unknown>,
-      false,
-      "操作已取消",
-    );
-    setPendingAction(null);
-    setSession((s) => {
-      if (!s) return s;
-      const updated = addMessage(s, toolMsg);
-      sessionRef.current = updated;
-
-      callOrchestrator("请继续", updated.messages)
-        .then((continueData) =>
-          handleOrchestratorResult(continueData, updated, actionType),
-        )
-        .then((finalSession) => setSession(finalSession))
-        .catch(() => {});
-
-      return updated;
-    });
+    setIsExecutingPending(true);
+    try {
+      const result = await callAgent("/api/command/cancel", {
+        pendingActionId: pendingAction.id,
+        messages: session.messages,
+      });
+      setSession(applyAgentResult(session, result));
+    } catch {
+      const errMsg = makeAssistantMessage("取消操作失败", "unknown");
+      setSession(addMessage(session, errMsg));
+    } finally {
+      setIsExecutingPending(false);
+    }
   }
 
   const messages = session?.messages ?? [];
