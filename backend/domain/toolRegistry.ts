@@ -39,6 +39,10 @@ export class ToolRegistry {
     return this.tools.get(name);
   }
 
+  listDescriptors(): readonly ToolDescriptor[] {
+    return [...this.tools.values()];
+  }
+
   async execute(command: ParsedCommandInput): Promise<ToolResult> {
     const tool = this.tools.get(command.tool);
     if (!tool) {
