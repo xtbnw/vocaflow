@@ -6,7 +6,7 @@ import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persist
 import type { CalendarEvent } from "@/backend/domain/calendarTypes";
 
 type ViewName = "year" | "month" | "day";
-type PickerName = "year" | "month" | null;
+type PickerName = "year" | "month" | "day" | null;
 
 const weekDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -35,8 +35,14 @@ export default function Home() {
     repoRef.current = new LocalStorageCalendarRepository();
   }
 
-  useEffect(() => {
+  const loadEvents = () => {
     repoRef.current!.list().then(setEvents);
+  };
+
+  useEffect(() => {
+    loadEvents();
+    window.addEventListener("vocaflow:events-changed", loadEvents);
+    return () => window.removeEventListener("vocaflow:events-changed", loadEvents);
   }, []);
 
   const displayMonthName = monthNames[displayMonthIndex];
@@ -65,7 +71,11 @@ export default function Home() {
 
   const switchView = (viewName: ViewName, dayNum: number | null = null) => {
     setActiveView(viewName);
-    setSelectedDay(dayNum);
+    if (viewName === "day" && dayNum === null && selectedDay === null) {
+      setSelectedDay(effectiveDay);
+    } else if (dayNum !== null) {
+      setSelectedDay(dayNum);
+    }
     setOpenPicker(null);
   };
 
@@ -85,16 +95,24 @@ export default function Home() {
     }
   };
 
+  const selectDay = (day: number, commit = true) => {
+    setSelectedDay(day);
+    if (commit) {
+      setOpenPicker(null);
+    }
+  };
+
+  const effectiveDay = selectedDay ?? (displayYear === initialYear && displayMonthIndex === initialMonthIndex ? currentDate.getDate() : 1);
+  const daysInMonth = new Date(displayYear, displayMonthIndex + 1, 0).getDate();
+
   const headerTitle =
     activeView === "year"
       ? String(displayYear)
       : activeView === "month"
         ? displayMonthName
-        : selectedDay
-          ? `${displayMonthName} ${selectedDay}, ${displayYear}`
-          : "Your Schedule";
+        : `${displayMonthIndex + 1}-${effectiveDay}`;
 
-  const pickerType = activeView === "year" ? "year" : activeView === "month" ? "month" : null;
+  const pickerType = activeView === "year" ? "year" : activeView === "month" ? "month" : "day";
 
   return (
     <>
@@ -123,6 +141,16 @@ export default function Home() {
                 options={monthNames.map((month, index) => ({ label: month, value: index }))}
                 value={displayMonthIndex}
                 onSelect={selectMonth}
+              />
+            ) : null}
+            {openPicker === "day" ? (
+              <WheelPicker
+                options={Array.from({ length: daysInMonth }, (_, i) => {
+                  const day = i + 1;
+                  return { label: `${displayMonthIndex + 1}-${day}`, value: day };
+                })}
+                value={effectiveDay}
+                onSelect={selectDay}
               />
             ) : null}
           </div>

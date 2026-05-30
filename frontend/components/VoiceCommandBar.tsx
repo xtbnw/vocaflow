@@ -53,6 +53,9 @@ export function VoiceCommandBar() {
       try {
         const execResult = await executorRef.current!.execute(data.tool, data.arguments);
         setResult(execResult);
+        if (execResult.success) {
+          window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
+        }
       } catch {
         setResult({
           kind: "execution",
