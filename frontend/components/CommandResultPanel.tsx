@@ -180,8 +180,6 @@ function toolLabel(tool: string): string {
       return "创建日程";
     case "query_events":
       return "查询日程";
-    case "find_events_for_delete":
-      return "查找待删除日程";
     default:
       return tool;
   }

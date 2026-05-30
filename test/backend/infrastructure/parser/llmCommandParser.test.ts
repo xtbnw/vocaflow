@@ -8,7 +8,7 @@ import { LLMCommandParser } from "../../../../backend/infrastructure/parser/llmC
 import {
   CreateEventArgsSchema,
   QueryEventsArgsSchema,
-  FindEventsForDeleteArgsSchema,
+  DeleteEventArgsSchema,
 } from "../../../../backend/domain/calendarTypes";
 
 // 加载 .env.local
@@ -26,7 +26,7 @@ try {
 const tools = [
   { name: "create_event", schema: CreateEventArgsSchema, handler: async () => {} },
   { name: "query_events", schema: QueryEventsArgsSchema, handler: async () => {} },
-  { name: "find_events_for_delete", schema: FindEventsForDeleteArgsSchema, handler: async () => {} },
+  { name: "delete_event", schema: DeleteEventArgsSchema, handler: async () => {} },
 ];
 
 const context = {
@@ -87,7 +87,7 @@ test("parse: nonsense → unknown", async () => {
   assert.equal(result.kind, "unknown");
 });
 
-test("parse: find_events_for_delete → tool_call or clarification", async () => {
+test("parse: delete_event via multi-step → tool_call or clarification", async () => {
   const llm = makeProvider();
   const parser = new LLMCommandParser(llm);
 
@@ -122,5 +122,5 @@ test("parse: with session history maintains context", async () => {
   const result = await parser.parse("会议室 A", context, tools, history);
   // With history context, the LLM should understand this completes a create_event
   // Mock returns tool_call so we accept any valid kind
-  assert.ok(["tool_call", "clarification", "chat", "unknown"].includes(result.kind));
+  assert.ok(["tool_call", "clarification", "chat", "unknown", "finish"].includes(result.kind));
 });

@@ -14,6 +14,7 @@ import {
 
 export type OrchestratorResult =
   | { kind: "chat"; message: string }
+  | { kind: "finish"; message: string }
   | { kind: "clarification"; clarificationQuestion: string; missingFields?: string[] }
   | { kind: "unknown"; reason?: string }
   | { kind: "tool_call"; tool: string; arguments: unknown; confidence?: number }
@@ -34,6 +35,7 @@ export class CommandOrchestrator {
     const tools = this.registry.listDescriptors();
     const result = await this.parser.parse(userText, context, tools, history);
 
+    if (result.kind === "finish") return result;
     if (result.kind !== "tool_call") return result;
 
     return this.validateAndFix(userText, result, context, history);
@@ -171,6 +173,11 @@ If B:
         content = `[Intent: execute ${msg.tool} with ${JSON.stringify(msg.arguments ?? {})}] ${content}`;
       }
       messages.push({ role: "assistant", content });
+    } else if (msg.kind === "tool") {
+      messages.push({
+        role: "user",
+        content: `[Tool Result: ${msg.toolName} — ${msg.success ? "success" : "failed"}]\n${msg.message}`,
+      });
     }
   }
 

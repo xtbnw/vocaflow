@@ -47,16 +47,14 @@ export const QueryEventsArgsSchema = z.object({
   keyword: z.string().optional(),
 });
 
-export const FindEventsForDeleteArgsSchema = z.object({
-  rangeStartAt: IsoDateTimeSchema.optional(),
-  rangeEndAt: IsoDateTimeSchema.optional(),
-  keyword: z.string().optional(),
+export const DeleteEventArgsSchema = z.object({
+  eventIds: z.array(z.string().min(1)).min(1),
 });
 
 export const CommandToolNameSchema = z.enum([
   "create_event",
   "query_events",
-  "find_events_for_delete",
+  "delete_event",
   "unknown",
 ]);
 
@@ -76,8 +74,8 @@ export const ParsedCommandSchema = z.discriminatedUnion("tool", [
     arguments: QueryEventsArgsSchema,
   }),
   ParsedCommandMetadataSchema.extend({
-    tool: z.literal("find_events_for_delete"),
-    arguments: FindEventsForDeleteArgsSchema,
+    tool: z.literal("delete_event"),
+    arguments: DeleteEventArgsSchema,
   }),
   ParsedCommandMetadataSchema.extend({
     tool: z.literal("unknown"),
@@ -91,8 +89,6 @@ export type CommandInputSource = z.infer<typeof CommandInputSourceSchema>;
 export type CommandInput = z.infer<typeof CommandInputSchema>;
 export type CreateEventArgs = z.infer<typeof CreateEventArgsSchema>;
 export type QueryEventsArgs = z.infer<typeof QueryEventsArgsSchema>;
-export type FindEventsForDeleteArgs = z.infer<
-  typeof FindEventsForDeleteArgsSchema
->;
+export type DeleteEventArgs = z.infer<typeof DeleteEventArgsSchema>;
 export type CommandToolName = z.infer<typeof CommandToolNameSchema>;
 export type ParsedCommand = z.infer<typeof ParsedCommandSchema>;
