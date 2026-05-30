@@ -1,4 +1,4 @@
-import type { ASRProvider } from "../../domain/asrProvider";
+import type { ASRProvider } from "@/backend/domain/asrProvider";
 
 /**
  * No-op ASR provider used as a fallback when Web Speech API is unavailable.

@@ -15,185 +15,63 @@ import {
   Trash2,
   Clock,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { Session, SessionMessage } from "@/backend/domain/sessionTypes";
-import type { AgentRunResult } from "@/backend/app/agentRunner";
-import type { PendingAction } from "@/backend/domain/pendingAction";
-import {
-  createSession,
-  addMessage,
-  makeUserMessage,
-  makeAssistantMessage,
-} from "@/backend/app/sessionManager";
-import { getASRProvider } from "@/backend/infrastructure/asr/asrProviderFactory";
+import { useEffect, useRef, useState } from "react";
+import type { SessionMessage } from "@/backend/domain/sessionTypes";
+import { useAgentSession } from "@/frontend/hooks/useAgentSession";
+import { useVoiceInput } from "@/frontend/hooks/useVoiceInput";
+import { useCalendarEventsRefresh } from "@/frontend/hooks/useCalendarEvents";
 import { ActionPreviewPanel } from "./ActionPreviewPanel";
 
 export function VoiceCommandBar() {
-  const [session, setSession] = useState<Session | null>(null);
-  const [inputText, setInputText] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [collapsed, setCollapsed] = useState(true);
-  const [isListening, setIsListening] = useState(false);
-  const [voiceSupported, setVoiceSupported] = useState(false);
-  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
-  const [isExecutingPending, setIsExecutingPending] = useState(false);
+  const triggerRefresh = useCalendarEventsRefresh();
 
-  useEffect(() => {
-    const asr = getASRProvider();
-    setVoiceSupported(asr.isSupported());
-  }, []);
+  const {
+    messages,
+    pendingAction,
+    isSubmitting,
+    isExecutingPending,
+    submitText,
+    confirmPending,
+    cancelPending,
+    clearSession,
+  } = useAgentSession(triggerRefresh);
+
+  const {
+    inputText,
+    setInputText,
+    isListening,
+    voiceSupported,
+    toggleListening,
+  } = useVoiceInput();
 
   const messageListRef = useRef<HTMLDivElement>(null);
 
-  const asrRef = useRef<ReturnType<typeof getASRProvider>>(null);
-  if (!asrRef.current) {
-    asrRef.current = getASRProvider();
-  }
-
-  // auto-scroll on new messages
   useEffect(() => {
     const el = messageListRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [session?.messages]);
+  }, [messages]);
 
-  const clearSession = useCallback(() => {
-    setSession(null);
-    setCollapsed(true);
-    setPendingAction(null);
-  }, []);
-
-  // wire ASR callbacks
-  const committedRef = useRef("");
-  useEffect(() => {
-    const asr = asrRef.current;
-    if (!asr) return;
-
-    asr.onPartialResult = (text) => {
-      const prefix = committedRef.current;
-      setInputText(prefix ? `${prefix} ${text}` : text);
-    };
-
-    asr.onFinalResult = (text) => {
-      committedRef.current = committedRef.current
-        ? `${committedRef.current} ${text}`
-        : text;
-      setInputText(committedRef.current);
-    };
-
-    asr.onError = (message) => {
-      console.error("ASR error:", message);
-      setIsListening(false);
-    };
-
-    return () => {
-      asr.onPartialResult = null;
-      asr.onFinalResult = null;
-      asr.onError = null;
-    };
-  }, []);
-
-  async function callAgent(
-    path: string,
-    body: Record<string, unknown>,
-  ): Promise<AgentRunResult> {
-    const res = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error("Agent request failed");
-    return (await res.json()) as AgentRunResult;
-  }
-
-  function applyAgentResult(
-    currentSession: Session,
-    result: AgentRunResult,
-  ): Session {
-    setPendingAction(result.pendingAction ?? null);
-    if (result.eventsChanged) {
-      window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
-    }
-    return {
-      ...currentSession,
-      messages: result.messages,
-      updatedAt: new Date().toISOString(),
-    };
-  }
-
-  const submitText = async (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = inputText.trim();
     if (!text || isSubmitting) return;
 
-    setIsSubmitting(true);
     setInputText("");
     setCollapsed(false);
-
-    const userMsg = makeUserMessage(text);
-    let cur = session ?? createSession();
-    const history = cur.messages;
-    cur = addMessage(cur, userMsg);
-    setSession(cur);
-
-    try {
-      const result = await callAgent("/api/command", {
-        message: userMsg,
-        messages: history,
-      });
-      setSession(applyAgentResult(cur, result));
-    } catch {
-      const errMsg = makeAssistantMessage("请求失败，请稍后重试", "unknown");
-      setSession((s) => (s ? addMessage(s, errMsg) : s));
-    } finally {
-      setIsSubmitting(false);
-    }
+    await submitText(text);
   };
 
-  async function handleConfirmPending() {
-    if (!pendingAction || !session || isExecutingPending) return;
+  const handleClearSession = () => {
+    clearSession();
+    setCollapsed(true);
+  };
 
-    setIsExecutingPending(true);
-
-    try {
-      const result = await callAgent("/api/command/confirm", {
-        pendingActionId: pendingAction.id,
-        messages: session.messages,
-      });
-      setSession(applyAgentResult(session, result));
-    } catch {
-      const errMsg = makeAssistantMessage("确认执行失败", "unknown");
-      setSession(addMessage(session, errMsg));
-      setPendingAction(null);
-    } finally {
-      setIsExecutingPending(false);
-    }
-  }
-
-  async function handleCancelPending() {
-    if (!pendingAction || !session || isExecutingPending) return;
-
-    setIsExecutingPending(true);
-    try {
-      const result = await callAgent("/api/command/cancel", {
-        pendingActionId: pendingAction.id,
-        messages: session.messages,
-      });
-      setSession(applyAgentResult(session, result));
-    } catch {
-      const errMsg = makeAssistantMessage("取消操作失败", "unknown");
-      setSession(addMessage(session, errMsg));
-    } finally {
-      setIsExecutingPending(false);
-    }
-  }
-
-  const messages = session?.messages ?? [];
   const hasMessages = messages.length > 0;
   const latestMessage = hasMessages ? messages[messages.length - 1] : null;
 
   return (
     <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-50 flex flex-col items-center gap-2 px-4 pb-4">
-      {/* expanded: all messages + optional preview panel */}
       {hasMessages && !collapsed && (
         <div
           className={`pointer-events-auto mb-2 flex w-full flex-col ${
@@ -216,15 +94,14 @@ export function VoiceCommandBar() {
               <div className="w-[320px] shrink-0">
                 <ActionPreviewPanel
                   pendingAction={pendingAction}
-                  onConfirm={handleConfirmPending}
-                  onCancel={handleCancelPending}
+                  onConfirm={confirmPending}
+                  onCancel={cancelPending}
                   disabled={isExecutingPending}
                 />
               </div>
             )}
           </div>
 
-          {/* action bar */}
           <div className="mt-2 flex items-center justify-between rounded-xl bg-[#f6f3f2]/90 px-4 py-2 text-xs text-[#49473f] backdrop-blur-sm">
             <button
               className="flex items-center gap-1 rounded-full px-3 py-1 transition-colors hover:bg-[#e5e2e1]/50"
@@ -235,7 +112,7 @@ export function VoiceCommandBar() {
             </button>
             <button
               className="flex items-center gap-1 rounded-full px-3 py-1 text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/50"
-              onClick={clearSession}
+              onClick={handleClearSession}
             >
               <Trash2 className="h-3.5 w-3.5" />
               清除
@@ -244,7 +121,6 @@ export function VoiceCommandBar() {
         </div>
       )}
 
-      {/* collapsed: latest message + pending indicator */}
       {hasMessages && collapsed && (
         <div className="pointer-events-auto mb-2 flex w-full max-w-[760px] flex-col">
           <div className="vf-glass rounded-2xl border border-white/30 p-3 shadow-sm">
@@ -266,7 +142,6 @@ export function VoiceCommandBar() {
             </div>
           )}
 
-          {/* action bar */}
           <div className="mt-2 flex items-center justify-between rounded-xl bg-[#f6f3f2]/90 px-4 py-2 text-xs text-[#49473f] backdrop-blur-sm">
             <button
               className="flex items-center gap-1 rounded-full px-3 py-1 transition-colors hover:bg-[#e5e2e1]/50"
@@ -277,7 +152,7 @@ export function VoiceCommandBar() {
             </button>
             <button
               className="flex items-center gap-1 rounded-full px-3 py-1 text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/50"
-              onClick={clearSession}
+              onClick={handleClearSession}
             >
               <Trash2 className="h-3.5 w-3.5" />
               清除
@@ -286,9 +161,7 @@ export function VoiceCommandBar() {
         </div>
       )}
 
-      {/* input bar */}
       <div className="pointer-events-auto flex w-full max-w-[760px] items-center justify-center gap-3">
-        {/* voice mic button */}
         <button
           className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full border shadow-sm transition-all duration-200 ${
             voiceSupported
@@ -298,21 +171,7 @@ export function VoiceCommandBar() {
               : "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
           }`}
           disabled={!voiceSupported}
-          onClick={() => {
-            if (!voiceSupported) return;
-            const asr = asrRef.current;
-            if (!asr) return;
-
-            if (isListening) {
-              asr.stop();
-              setIsListening(false);
-            } else {
-              committedRef.current = "";
-              setInputText("");
-              asr.start();
-              setIsListening(true);
-            }
-          }}
+          onClick={toggleListening}
           title={
             voiceSupported
               ? isListening
@@ -328,10 +187,9 @@ export function VoiceCommandBar() {
           )}
         </button>
 
-        {/* text input */}
         <form
           className="vf-glass flex h-12 min-w-0 flex-1 items-center rounded-full border border-white/30 px-5 shadow-sm transition-colors focus-within:border-[#625f50]/50"
-          onSubmit={submitText}
+          onSubmit={handleSubmit}
         >
           <input
             className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
@@ -339,8 +197,7 @@ export function VoiceCommandBar() {
             placeholder={
               isSubmitting
                 ? "处理中..."
-                : session?.status === "active" &&
-                    session.messages.some(
+                : messages.some(
                       (m) =>
                         m.kind === "assistant" &&
                         m.resultKind === "clarification",
@@ -364,8 +221,6 @@ export function VoiceCommandBar() {
     </div>
   );
 }
-
-// -- Message bubble renderers --
 
 function MessageBubble({ message }: { message: SessionMessage }) {
   switch (message.kind) {
@@ -445,8 +300,6 @@ function MessageBubble({ message }: { message: SessionMessage }) {
       );
   }
 }
-
-// -- helpers --
 
 function assistantIcon(
   kind: "clarification" | "chat" | "unknown" | "tool_call" | "finish",

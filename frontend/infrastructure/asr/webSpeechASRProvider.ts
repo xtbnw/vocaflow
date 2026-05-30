@@ -1,4 +1,4 @@
-import type { ASRProvider } from "../../domain/asrProvider";
+import type { ASRProvider } from "@/backend/domain/asrProvider";
 
 /**
  * ASR provider backed by the browser Web Speech API.

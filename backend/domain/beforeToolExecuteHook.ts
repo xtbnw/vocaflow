@@ -1,4 +1,4 @@
-import type { ToolExecutionResult } from "./toolExecutionResult";
+import type { ToolExecutionResult } from "../app/types/toolExecutionResult";
 
 export interface ToolExecutionContext {
   toolName: string;

@@ -4,7 +4,7 @@ import {
   makeToolMessage,
 } from "./sessionManager";
 import type { ToolExecutor } from "./toolExecutor";
-import type { PendingAction } from "../domain/pendingAction";
+import type { PendingAction } from "./types/pendingAction";
 import type {
   SessionMessage,
   UserMessage,

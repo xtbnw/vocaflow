@@ -5,37 +5,16 @@ import type {
 } from "../domain/beforeToolExecuteHook";
 import type { CalendarRepository } from "../domain/calendarRepository";
 import type { CalendarEvent } from "../domain/calendarTypes";
-import type { PendingAction, ActionPreview } from "../domain/pendingAction";
+import type { PendingAction, ActionPreview } from "./types/pendingAction";
+import {
+  newId,
+  defaultEndAt,
+  formatLocalTime,
+  formatTimeRange,
+  toTimestamp,
+} from "../shared/timeUtils";
 
 const WRITE_TOOLS = new Set(["create_event", "delete_event"]);
-
-function newId(): string {
-  if (typeof crypto !== "undefined" && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function formatLocalTime(iso: string): string {
-  const d = new Date(iso);
-  const month = d.getMonth() + 1;
-  const day = d.getDate();
-  const hour = String(d.getHours()).padStart(2, "0");
-  const min = String(d.getMinutes()).padStart(2, "0");
-  return `${month}月${day}日 ${hour}:${min}`;
-}
-
-function formatTimeRange(event: CalendarEvent): string {
-  const start = new Date(event.startAt);
-  const end = new Date(event.endAt);
-  const startTime = `${String(start.getHours()).padStart(2, "0")}:${String(start.getMinutes()).padStart(2, "0")}`;
-  const endTime = `${String(end.getHours()).padStart(2, "0")}:${String(end.getMinutes()).padStart(2, "0")}`;
-  return `${startTime}-${endTime}`;
-}
-
-function defaultEndAt(startAt: string): string {
-  return new Date(new Date(startAt).getTime() + 3_600_000).toISOString();
-}
 
 async function buildCreateEventPreview(
   args: Record<string, unknown>,
@@ -71,13 +50,13 @@ async function buildCreateEventPreview(
     const existingEvents = await repository.list();
     const conflicts = existingEvents.filter(
       (event) =>
-        new Date(event.startAt).getTime() < endTime &&
-        new Date(event.endAt).getTime() > startTime,
+        toTimestamp(event.startAt) < endTime &&
+        toTimestamp(event.endAt) > startTime,
     );
     warnings.push(
       ...conflicts.map(
         (event) =>
-          `时间冲突：${formatTimeRange(event)} 已有“${event.title}”`,
+          `时间冲突：${formatTimeRange(event.startAt, event.endAt)} 已有"${event.title}"`,
       ),
     );
   }

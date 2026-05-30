@@ -2,13 +2,11 @@ import type { ChatMessage, LLMProvider } from "../../domain/llmProvider";
 import type { ToolDescriptor } from "../../domain/toolRegistry";
 import type { ParseResult } from "../../domain/commandTypes";
 import type { SessionMessage } from "../../domain/sessionTypes";
+import type { CommandParser, ParserContext } from "../../app/ports/commandParser";
 
-export interface ParserContext {
-  currentTime: string;
-  timezone: string;
-}
+export type { ParserContext };
 
-export class LLMCommandParser {
+export class LLMCommandParser implements CommandParser {
   constructor(private readonly llm: LLMProvider) {}
 
   async parse(

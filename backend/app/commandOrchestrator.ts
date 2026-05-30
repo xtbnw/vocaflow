@@ -2,14 +2,11 @@ import type { z } from "zod";
 import type { LLMProvider } from "../domain/llmProvider";
 import type { ChatMessage } from "../domain/llmProvider";
 import type { ToolDescriptor, ToolRegistry } from "../domain/toolRegistry";
-import type { ParseResult } from "../domain/commandTypes";
 import type { SessionMessage } from "../domain/sessionTypes";
+import type { CommandParser, ParserContext } from "./ports/commandParser";
 import {
-  LLMCommandParser,
-  type ParserContext,
   extractJson,
   describeSchemaForPrompt,
-  buildSystemPrompt,
 } from "../infrastructure/parser/llmCommandParser";
 
 export type OrchestratorResult =
@@ -23,7 +20,7 @@ export type OrchestratorResult =
 export class CommandOrchestrator {
   constructor(
     private readonly llm: LLMProvider,
-    private readonly parser: LLMCommandParser,
+    private readonly parser: CommandParser,
     private readonly registry: ToolRegistry,
   ) {}
 

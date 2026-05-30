@@ -1,11 +1,11 @@
 import type { ToolRegistry } from "../domain/toolRegistry";
-import type { ToolExecutionResult } from "../domain/toolExecutionResult";
-import type { CalendarEvent } from "../domain/calendarTypes";
+import type { ToolExecutionResult } from "./types/toolExecutionResult";
 import type {
   BeforeToolExecuteHook,
   ToolExecutionContext,
 } from "../domain/beforeToolExecuteHook";
-import type { PendingAction } from "../domain/pendingAction";
+import type { PendingAction } from "./types/pendingAction";
+import { formatToolResult } from "./toolResultPresenter";
 
 export class ToolExecutor {
   private readonly beforeHooks: BeforeToolExecuteHook[] = [];
@@ -112,61 +112,6 @@ export class ToolExecutor {
   }
 
   private formatMessage(tool: string, data: unknown): string {
-    if (!data || typeof data !== "object") return "执行成功";
-
-    const obj = data as Record<string, unknown>;
-
-    switch (tool) {
-      case "create_event": {
-        const event = obj.event as Record<string, unknown> | undefined;
-        const title = event?.title ?? "(无标题)";
-        const startAt = event?.startAt
-          ? formatLocalTime(event.startAt as string)
-          : "";
-        const endAt = event?.endAt
-          ? formatLocalTime(event.endAt as string)
-          : "";
-        const timeRange = endAt ? `${startAt}-${endAt}` : startAt;
-        return `已创建日程：${title}（${timeRange}）`;
-      }
-
-      case "query_events": {
-        const events = obj.events as CalendarEvent[] | undefined;
-        if (!events || events.length === 0) return "该时间段暂无安排";
-        if (events.length === 1) {
-          return `找到 1 个日程：\n${formatEvent(events[0])}`;
-        }
-        return `找到 ${events.length} 个日程：\n${events
-          .map((e) => `  · ${formatEvent(e)}`)
-          .join("\n")}`;
-      }
-
-      case "delete_event": {
-        const deleted = (obj.deleted as number) ?? 0;
-        const failed = (obj.failed as number) ?? 0;
-        let msg = `已删除 ${deleted} 个日程`;
-        if (failed > 0) msg += `，${failed} 个删除失败`;
-        return msg;
-      }
-
-      default:
-        return "执行成功";
-    }
+    return formatToolResult(tool, data);
   }
-}
-
-function formatLocalTime(iso: string): string {
-  const d = new Date(iso);
-  const month = d.getMonth() + 1;
-  const day = d.getDate();
-  const hour = String(d.getHours()).padStart(2, "0");
-  const min = String(d.getMinutes()).padStart(2, "0");
-  return `${month}月${day}日 ${hour}:${min}`;
-}
-
-function formatEvent(e: CalendarEvent): string {
-  const start = formatLocalTime(e.startAt);
-  const end = formatLocalTime(e.endAt);
-  const location = e.location ? ` @${e.location}` : "";
-  return `[${e.id}] ${e.title}  ${start} - ${end}${location}`;
 }

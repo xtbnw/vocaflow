@@ -1,4 +1,4 @@
-import type { ASRProvider } from "../../domain/asrProvider";
+import type { ASRProvider } from "@/backend/domain/asrProvider";
 import { WebSpeechASRProvider } from "./webSpeechASRProvider";
 import { NoopASRProvider } from "./noopASRProvider";
 

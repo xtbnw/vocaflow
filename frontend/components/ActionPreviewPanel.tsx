@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, X, AlertTriangle, CalendarPlus, Trash2 } from "lucide-react";
-import type { PendingAction } from "@/backend/domain/pendingAction";
+import type { PendingAction } from "@/backend/app/types/pendingAction";
 
 interface ActionPreviewPanelProps {
   pendingAction: PendingAction;
