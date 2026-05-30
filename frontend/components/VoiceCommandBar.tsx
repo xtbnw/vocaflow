@@ -10,8 +10,9 @@ import {
   MessageCircle,
   HelpCircle,
   AlertTriangle,
-  X,
   ChevronUp,
+  ChevronDown,
+  Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Session, SessionMessage } from "@/backend/domain/sessionTypes";
@@ -20,7 +21,6 @@ import type { ToolExecutionResult } from "@/backend/domain/toolExecutionResult";
 import {
   createSession,
   addMessage,
-  endSession,
   makeUserMessage,
   makeAssistantMessage,
   makeToolMessage,
@@ -30,29 +30,12 @@ import { createDefaultToolRegistry } from "@/backend/domain/toolRegistry";
 import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persistence/localStorageCalendarRepository";
 import { getASRProvider } from "@/backend/infrastructure/asr/asrProviderFactory";
 
-const SESSION_STORAGE_KEY = "vocaflow.currentSession";
-const COLLAPSE_DELAY_S = 10;
-
 export function VoiceCommandBar() {
-  const [session, setSession] = useState<Session | null>(() => {
-    if (typeof window === "undefined") return null;
-    try {
-      const raw = localStorage.getItem(SESSION_STORAGE_KEY);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.status === "active" && Array.isArray(parsed.messages)) {
-        return parsed as Session;
-      }
-    } catch {
-      /* ignore */
-    }
-    return null;
-  });
+  const [session, setSession] = useState<Session | null>(null);
 
   const [inputText, setInputText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
-  const [collapseCountdown, setCollapseCountdown] = useState<number | null>(null);
+  const [collapsed, setCollapsed] = useState(true);
   const [isListening, setIsListening] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
   useEffect(() => {
@@ -61,7 +44,6 @@ export function VoiceCommandBar() {
   }, []);
 
   const messageListRef = useRef<HTMLDivElement>(null);
-  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const executorRef = useRef<ToolExecutor | null>(null);
   if (!executorRef.current) {
@@ -75,44 +57,15 @@ export function VoiceCommandBar() {
     asrRef.current = getASRProvider();
   }
 
-  // persist session
-  useEffect(() => {
-    if (!session || session.messages.length === 0) {
-      localStorage.removeItem(SESSION_STORAGE_KEY);
-    } else {
-      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
-    }
-  }, [session]);
-
   // auto-scroll on new messages
   useEffect(() => {
     const el = messageListRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [session?.messages]);
 
-  // collapse countdown
-  useEffect(() => {
-    if (collapseCountdown === null || collapseCountdown <= 0) return;
-
-    countdownRef.current = setInterval(() => {
-      setCollapseCountdown((prev) => {
-        if (prev === null || prev <= 1) {
-          setCollapsed(true);
-          return null;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => {
-      if (countdownRef.current) clearInterval(countdownRef.current);
-    };
-  }, [collapseCountdown]);
-
   const clearSession = useCallback(() => {
     setSession(null);
-    setCollapsed(false);
-    setCollapseCountdown(null);
+    setCollapsed(true);
   }, []);
 
   // wire ASR callbacks
@@ -152,7 +105,7 @@ export function VoiceCommandBar() {
 
     setIsSubmitting(true);
     setInputText("");
-    if (collapsed) setCollapsed(false);
+    setCollapsed(false);
 
     const userMsg = makeUserMessage(text);
     let cur = session ?? createSession();
@@ -246,9 +199,7 @@ export function VoiceCommandBar() {
           cur = addMessage(cur, toolMsg);
         }
 
-        cur = endSession(cur);
         setSession(cur);
-        setCollapseCountdown(COLLAPSE_DELAY_S);
         break;
       }
     }
@@ -256,13 +207,12 @@ export function VoiceCommandBar() {
 
   const messages = session?.messages ?? [];
   const hasMessages = messages.length > 0;
-  const showMessages = hasMessages && !collapsed;
-  const sessionCompleted = session?.status === "completed";
+  const latestMessage = hasMessages ? messages[messages.length - 1] : null;
 
   return (
     <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-50 flex flex-col items-center gap-2 px-4 pb-4">
-      {/* message stream */}
-      {showMessages && (
+      {/* expanded: all messages */}
+      {hasMessages && !collapsed && (
         <div className="pointer-events-auto mb-2 flex w-full max-w-[760px] flex-col">
           <div
             className="vf-glass max-h-[40vh] overflow-y-auto rounded-2xl border border-white/30 p-3 shadow-sm"
@@ -273,42 +223,48 @@ export function VoiceCommandBar() {
             ))}
           </div>
 
-          {/* collapse countdown bar */}
-          {sessionCompleted && collapseCountdown !== null && (
-            <div className="mt-2 flex items-center justify-between rounded-xl bg-[#f6f3f2]/90 px-4 py-2 text-xs text-[#49473f] backdrop-blur-sm">
-              <span>
-                会话已完成 · {collapseCountdown} 秒后自动收起
-              </span>
-              <button
-                className="rounded-full px-3 py-1 text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/50"
-                onClick={clearSession}
-              >
-                删除
-              </button>
-            </div>
-          )}
+          {/* action bar */}
+          <div className="mt-2 flex items-center justify-between rounded-xl bg-[#f6f3f2]/90 px-4 py-2 text-xs text-[#49473f] backdrop-blur-sm">
+            <button
+              className="flex items-center gap-1 rounded-full px-3 py-1 transition-colors hover:bg-[#e5e2e1]/50"
+              onClick={() => setCollapsed(true)}
+            >
+              <ChevronDown className="h-3.5 w-3.5" />
+              收起
+            </button>
+            <button
+              className="flex items-center gap-1 rounded-full px-3 py-1 text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/50"
+              onClick={clearSession}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              清除
+            </button>
+          </div>
         </div>
       )}
 
-      {/* collapsed session indicator */}
-      {collapsed && sessionCompleted && (
-        <div className="pointer-events-auto mb-2 flex w-full max-w-[760px] items-center justify-between rounded-xl bg-[#f6f3f2]/90 px-4 py-2 text-xs text-[#49473f] backdrop-blur-sm">
-          <span>上一次会话已完成</span>
-          <div className="flex gap-2">
+      {/* collapsed: latest message only */}
+      {hasMessages && collapsed && (
+        <div className="pointer-events-auto mb-2 flex w-full max-w-[760px] flex-col">
+          <div className="vf-glass rounded-2xl border border-white/30 p-3 shadow-sm">
+            <MessageBubble message={latestMessage!} />
+          </div>
+
+          {/* action bar */}
+          <div className="mt-2 flex items-center justify-between rounded-xl bg-[#f6f3f2]/90 px-4 py-2 text-xs text-[#49473f] backdrop-blur-sm">
             <button
-              className="rounded-full px-3 py-1 transition-colors hover:bg-[#e5e2e1]/50"
-              onClick={() => {
-                setCollapsed(false);
-                setCollapseCountdown(null);
-              }}
+              className="flex items-center gap-1 rounded-full px-3 py-1 transition-colors hover:bg-[#e5e2e1]/50"
+              onClick={() => setCollapsed(false)}
             >
+              <ChevronUp className="h-3.5 w-3.5" />
               展开
             </button>
             <button
-              className="rounded-full px-3 py-1 text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/50"
+              className="flex items-center gap-1 rounded-full px-3 py-1 text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/50"
               onClick={clearSession}
             >
-              删除
+              <Trash2 className="h-3.5 w-3.5" />
+              清除
             </button>
           </div>
         </div>
