@@ -1,9 +1,4 @@
-import type { LLMProvider, LLMProviderConfig } from "../../domain/llmProvider";
-
-interface DeepSeekMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-}
+import type { LLMProvider, LLMProviderConfig, ChatMessage } from "../../domain/llmProvider";
 
 interface DeepSeekResponse {
   choices: { message: { content: string } }[];
@@ -24,11 +19,7 @@ export class DeepSeekProvider implements LLMProvider {
     this.config = config;
   }
 
-  async chat(prompt: string): Promise<string> {
-    const messages: DeepSeekMessage[] = [
-      { role: "user", content: prompt },
-    ];
-
+  async chat(messages: ChatMessage[]): Promise<string> {
     const response = await fetch(this.config.url, {
       method: "POST",
       headers: {

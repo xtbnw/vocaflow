@@ -1,13 +1,16 @@
 "use client";
 
-import { X, MessageCircle, HelpCircle, AlertTriangle, Wrench } from "lucide-react";
+import { CheckCircle2, X, MessageCircle, HelpCircle, AlertTriangle, Wrench, XCircle } from "lucide-react";
 import type { OrchestratorResult } from "@/backend/app/commandOrchestrator";
+import type { ToolExecutionResult } from "@/backend/domain/toolExecutionResult";
+
+type CommandResult = OrchestratorResult | ToolExecutionResult;
 
 export function CommandResultPanel({
   result,
   onDismiss,
 }: {
-  result: OrchestratorResult;
+  result: CommandResult;
   onDismiss: () => void;
 }) {
   return (
@@ -25,7 +28,7 @@ export function CommandResultPanel({
   );
 }
 
-function renderResult(result: OrchestratorResult) {
+function renderResult(result: CommandResult) {
   switch (result.kind) {
     case "chat":
       return <ChatContent message={result.message} />;
@@ -37,6 +40,8 @@ function renderResult(result: OrchestratorResult) {
       return <UnknownContent reason={result.reason} />;
     case "error":
       return <ErrorContent message={result.message} />;
+    case "execution":
+      return <ExecutionContent result={result} />;
   }
 }
 
@@ -150,6 +155,21 @@ function ErrorContent({ message }: { message: string }) {
   return (
     <ResultRow icon={<AlertTriangle className="h-3.5 w-3.5" />} label="错误">
       {message}
+    </ResultRow>
+  );
+}
+
+function ExecutionContent({ result }: { result: ToolExecutionResult }) {
+  return (
+    <ResultRow
+      icon={
+        result.success
+          ? <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+          : <XCircle className="h-3.5 w-3.5 text-red-500" />
+      }
+      label={result.success ? "执行成功" : "执行失败"}
+    >
+      <p>{result.message}</p>
     </ResultRow>
   );
 }

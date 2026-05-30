@@ -3,6 +3,8 @@ import { CommandOrchestrator } from "@/backend/app/commandOrchestrator";
 import { LLMCommandParser } from "@/backend/infrastructure/parser/llmCommandParser";
 import { getLLMProvider } from "@/backend/infrastructure/llm/llmProviderFactory";
 import { createDefaultToolRegistry } from "@/backend/domain/toolRegistry";
+import { SessionMessageSchema } from "@/backend/domain/sessionTypes";
+import type { SessionMessage } from "@/backend/domain/sessionTypes";
 
 const llm = getLLMProvider();
 const parser = new LLMCommandParser(llm);
@@ -27,12 +29,22 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { text } = body as Record<string, unknown>;
+  const { text, messages } = body as Record<string, unknown>;
+
   if (typeof text !== "string" || !text.trim()) {
     return NextResponse.json(
       { kind: "error", message: "请输入内容" },
       { status: 400 },
     );
+  }
+
+  let history: SessionMessage[] = [];
+  if (Array.isArray(messages)) {
+    for (const msg of messages) {
+      const parsed = SessionMessageSchema.safeParse(msg);
+      if (!parsed.success) continue;
+      history.push(parsed.data as SessionMessage);
+    }
   }
 
   const now = new Date();
@@ -41,6 +53,6 @@ export async function POST(request: NextRequest) {
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   };
 
-  const result = await orchestrator.process(text.trim(), context);
+  const result = await orchestrator.process(text.trim(), context, history);
   return NextResponse.json(result);
 }

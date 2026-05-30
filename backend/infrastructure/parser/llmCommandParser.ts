@@ -1,6 +1,7 @@
-import type { LLMProvider } from "../../domain/llmProvider";
+import type { ChatMessage, LLMProvider } from "../../domain/llmProvider";
 import type { ToolDescriptor } from "../../domain/toolRegistry";
 import type { ParseResult } from "../../domain/commandTypes";
+import type { SessionMessage } from "../../domain/sessionTypes";
 
 export interface ParserContext {
   currentTime: string;
@@ -11,14 +12,15 @@ export class LLMCommandParser {
   constructor(private readonly llm: LLMProvider) {}
 
   async parse(
-    userText: string,
+    currentText: string,
     context: ParserContext,
     tools: readonly ToolDescriptor[],
+    history: readonly SessionMessage[] = [],
   ): Promise<ParseResult> {
-    const prompt = buildPrompt(userText, context, tools);
+    const messages = buildMessages(currentText, context, tools, history);
 
     try {
-      const raw = await this.llm.chat(prompt);
+      const raw = await this.llm.chat(messages);
       const jsonText = extractJson(raw);
       const parsed = JSON.parse(jsonText);
       return validateResult(parsed);
@@ -31,31 +33,25 @@ export class LLMCommandParser {
   }
 }
 
-export function buildPrompt(
-  userText: string,
-  context: ParserContext,
-  tools: readonly ToolDescriptor[],
-): string {
-  const toolDescriptions = tools
-    .map((t) => `- ${t.name}: ${describeSchemaForPrompt(t.schema)}`)
-    .join("\n");
-
-  return `You are a command parser. Analyze user input and output exactly one JSON object.
+const SYSTEM_INSTRUCTIONS = `You are a command parser for a voice calendar assistant. Analyze the user's input in the context of the conversation history and output exactly one JSON object.
 
 ## Available Tools
-${toolDescriptions || "- (none)"}
+{{TOOLS}}
 
 ## Context
-- Current time: ${context.currentTime}
-- Timezone: ${context.timezone}
+- Current time: {{CURRENT_TIME}}
+- Timezone: {{TIMEZONE}}
 
 ## Task
-Classify the user's input into one of four kinds. Output ONLY the JSON — no markdown, no backticks, no explanations.
+Classify the user's input into one of four kinds. Consider the full conversation history when interpreting the current message — the user may be answering a previous clarification question or adding detail to a prior request. Output ONLY the JSON — no markdown, no backticks, no explanations.
 
 ## Kinds
 
 ### tool_call
-The user wants to execute a tool. All required arguments must be extractable from the user's words. If any required field is missing, use "clarification" instead. Do NOT invent dates/times/names the user did not provide.
+The user wants to execute a calendar tool. All required arguments must be extractable from the user's words combined with conversation history. If any required field is still missing, use "clarification" instead. Do NOT invent dates/times the user did not provide.
+
+IMPORTANT — title field: use exactly what the user said about the event. Generic words like "开会", "见面", "聚餐", "讨论", "碰一下", "聊一聊" ARE valid titles — do NOT ask for a more specific topic. The user's own phrasing is the title.
+
 {
   "kind": "tool_call",
   "tool": "<tool name>",
@@ -64,7 +60,7 @@ The user wants to execute a tool. All required arguments must be extractable fro
 }
 
 ### clarification
-A required field is missing or the intent is ambiguous. Ask ONE specific question.
+A required field is missing or the intent is ambiguous. Ask ONE specific question in the user's language. Do NOT ask the user to elaborate a title that is already sufficient — "开会" is a complete title; "明天开会" needs only time resolution, not a topic question.
 {
   "kind": "clarification",
   "clarificationQuestion": "<one clear question in the user's language>",
@@ -79,14 +75,61 @@ Conversational message unrelated to calendar tools — greeting, chit-chat, gene
 }
 
 ### unknown
-Cannot understand the intent at all.
+Cannot understand the intent at all, even with conversation history.
 {
   "kind": "unknown",
   "reason": "<brief reason>"
+}`;
+
+export function buildMessages(
+  currentText: string,
+  context: ParserContext,
+  tools: readonly ToolDescriptor[],
+  history: readonly SessionMessage[] = [],
+): ChatMessage[] {
+  const toolDescriptions = tools
+    .map((t) => `- ${t.name}: ${describeSchemaForPrompt(t.schema)}`)
+    .join("\n");
+
+  const systemContent = SYSTEM_INSTRUCTIONS
+    .replace("{{TOOLS}}", toolDescriptions || "- (none)")
+    .replace("{{CURRENT_TIME}}", context.currentTime)
+    .replace("{{TIMEZONE}}", context.timezone);
+
+  const messages: ChatMessage[] = [
+    { role: "system", content: systemContent },
+  ];
+
+  for (const msg of history) {
+    if (msg.kind === "user") {
+      messages.push({ role: "user", content: msg.text });
+    } else if (msg.kind === "assistant") {
+      let content = msg.content;
+      if (msg.resultKind === "tool_call" && msg.tool) {
+        content = `[Intent: execute ${msg.tool} with ${JSON.stringify(msg.arguments ?? {})}] ${content}`;
+      }
+      messages.push({ role: "assistant", content });
+    }
+    // Tool messages are not sent to LLM — session ends after tool execution
+  }
+
+  messages.push({ role: "user", content: currentText });
+
+  return messages;
 }
 
-## User Input
-${userText}`;
+export function buildSystemPrompt(
+  context: ParserContext,
+  tools: readonly ToolDescriptor[],
+): string {
+  const toolDescriptions = tools
+    .map((t) => `- ${t.name}: ${describeSchemaForPrompt(t.schema)}`)
+    .join("\n");
+
+  return SYSTEM_INSTRUCTIONS
+    .replace("{{TOOLS}}", toolDescriptions || "- (none)")
+    .replace("{{CURRENT_TIME}}", context.currentTime)
+    .replace("{{TIMEZONE}}", context.timezone);
 }
 
 export function describeSchemaForPrompt(schema: unknown): string {
@@ -118,12 +161,10 @@ function zodTypeLabel(typeName: string): string {
 }
 
 export function extractJson(text: string): string {
-  // strip markdown code fences if present
   const fenceJson = /```(?:json)?\s*\n?([\s\S]*?)```/;
   const match = text.match(fenceJson);
   if (match) return match[1].trim();
 
-  // find the first { ... } pair
   const firstBrace = text.indexOf("{");
   if (firstBrace === -1) return text;
   let depth = 0;

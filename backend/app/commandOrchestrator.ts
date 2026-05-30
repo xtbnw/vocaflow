@@ -1,12 +1,15 @@
 import type { z } from "zod";
 import type { LLMProvider } from "../domain/llmProvider";
+import type { ChatMessage } from "../domain/llmProvider";
 import type { ToolDescriptor, ToolRegistry } from "../domain/toolRegistry";
 import type { ParseResult } from "../domain/commandTypes";
+import type { SessionMessage } from "../domain/sessionTypes";
 import {
   LLMCommandParser,
   type ParserContext,
   extractJson,
   describeSchemaForPrompt,
+  buildSystemPrompt,
 } from "../infrastructure/parser/llmCommandParser";
 
 export type OrchestratorResult =
@@ -26,18 +29,21 @@ export class CommandOrchestrator {
   async process(
     userText: string,
     context: ParserContext,
+    history: readonly SessionMessage[] = [],
   ): Promise<OrchestratorResult> {
     const tools = this.registry.listDescriptors();
-    const result = await this.parser.parse(userText, context, tools);
+    const result = await this.parser.parse(userText, context, tools, history);
 
     if (result.kind !== "tool_call") return result;
 
-    return this.validateAndFix(userText, result);
+    return this.validateAndFix(userText, result, context, history);
   }
 
   private async validateAndFix(
     userText: string,
     toolCall: { tool: string; arguments: Record<string, unknown>; confidence?: number },
+    context: ParserContext,
+    history: readonly SessionMessage[] = [],
     attempt = 0,
   ): Promise<OrchestratorResult> {
     const tool = this.registry.get(toolCall.tool);
@@ -70,6 +76,8 @@ export class CommandOrchestrator {
       toolCall,
       tool,
       parsed.error,
+      context,
+      history,
     );
 
     if (attribution.kind === "clarification") return attribution;
@@ -77,6 +85,8 @@ export class CommandOrchestrator {
     return this.validateAndFix(
       userText,
       { tool: toolCall.tool, arguments: attribution.arguments, confidence: toolCall.confidence },
+      context,
+      history,
       attempt + 1,
     );
   }
@@ -86,19 +96,23 @@ export class CommandOrchestrator {
     toolCall: { tool: string; arguments: Record<string, unknown> },
     tool: ToolDescriptor,
     zodError: z.ZodError,
+    context: ParserContext,
+    history: readonly SessionMessage[] = [],
   ): Promise<
     | { kind: "clarification"; clarificationQuestion: string; missingFields: string[] }
     | { kind: "tool_call"; arguments: Record<string, unknown> }
   > {
-    const prompt = buildAttributionPrompt(
+    const messages = buildAttributionMessages(
       userText,
       toolCall,
       tool,
       zodError,
+      context,
+      history,
     );
 
     try {
-      const raw = await this.llm.chat(prompt);
+      const raw = await this.llm.chat(messages);
       const jsonText = extractJson(raw);
       const parsed = JSON.parse(jsonText);
       return validateAttributionResult(parsed);
@@ -112,33 +126,29 @@ export class CommandOrchestrator {
   }
 }
 
-function buildAttributionPrompt(
+function buildAttributionMessages(
   userText: string,
   toolCall: { tool: string; arguments: Record<string, unknown> },
   tool: ToolDescriptor,
   zodError: z.ZodError,
-): string {
-  return `You are a command validation assistant. A user's command was parsed but failed schema validation. Determine the root cause.
+  context: ParserContext,
+  history: readonly SessionMessage[] = [],
+): ChatMessage[] {
+  const systemContent = `You are a command validation assistant. A user's command was parsed but failed schema validation. Determine the root cause.
 
-## User Input
-${userText}
+## Available Tool Schema
+${tool.name}: ${describeSchemaForPrompt(tool.schema)}
 
-## Parsed Tool Call
-Tool: ${toolCall.tool}
-Arguments: ${JSON.stringify(toolCall.arguments, null, 2)}
-
-## Expected Schema
-${describeSchemaForPrompt(tool.schema)}
-
-## Validation Error
-${zodError.message}
+## Context
+- Current time: ${context.currentTime}
+- Timezone: ${context.timezone}
 
 ## Task
 Classify the error as ONE of:
 
-**A. User information missing** — required fields are genuinely absent from the user's words. The user did NOT say or imply the missing values. Do NOT guess or invent missing information.
+**A. User information missing** — required fields are genuinely absent from the user's words (considering conversation history). The user did NOT say or imply the missing values. Do NOT guess or invent missing information.
 
-**B. JSON generation error** — the information IS present in the user's input, but the JSON output was malformed (wrong type, wrong field name, format error, or a required field that the user clearly stated was omitted from the JSON). Fix the JSON using only information the user provided.
+**B. JSON generation error** — the information IS present in the user's input (or conversation history), but the JSON output was malformed (wrong type, wrong field name, format error, or a required field that the user clearly stated was omitted from the JSON). Fix the JSON using only information the user provided.
 
 Output ONLY one JSON object — no markdown, no backticks, no explanation.
 
@@ -147,6 +157,29 @@ If A:
 
 If B:
 {"kind": "tool_call", "arguments": { ...corrected arguments using only user-provided info } }`;
+
+  const messages: ChatMessage[] = [
+    { role: "system", content: systemContent },
+  ];
+
+  for (const msg of history) {
+    if (msg.kind === "user") {
+      messages.push({ role: "user", content: msg.text });
+    } else if (msg.kind === "assistant") {
+      let content = msg.content;
+      if (msg.resultKind === "tool_call" && msg.tool) {
+        content = `[Intent: execute ${msg.tool} with ${JSON.stringify(msg.arguments ?? {})}] ${content}`;
+      }
+      messages.push({ role: "assistant", content });
+    }
+  }
+
+  messages.push({
+    role: "user",
+    content: `## Current User Input\n${userText}\n\n## Parsed Tool Call\nTool: ${toolCall.tool}\nArguments: ${JSON.stringify(toolCall.arguments, null, 2)}\n\n## Validation Error\n${zodError.message}`,
+  });
+
+  return messages;
 }
 
 function validateAttributionResult(

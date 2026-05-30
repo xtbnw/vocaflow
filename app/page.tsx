@@ -6,7 +6,6 @@ import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persist
 import type { CalendarEvent } from "@/backend/domain/calendarTypes";
 
 type ViewName = "year" | "month" | "day";
-type PickerName = "year" | "month" | null;
 
 const weekDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -27,7 +26,6 @@ export default function Home() {
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [displayYear, setDisplayYear] = useState(initialYear);
   const [displayMonthIndex, setDisplayMonthIndex] = useState(initialMonthIndex);
-  const [openPicker, setOpenPicker] = useState<PickerName>(null);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
 
   const repoRef = useRef<LocalStorageCalendarRepository | null>(null);
@@ -35,11 +33,15 @@ export default function Home() {
     repoRef.current = new LocalStorageCalendarRepository();
   }
 
-  useEffect(() => {
+  const loadEvents = () => {
     repoRef.current!.list().then(setEvents);
-  }, []);
+  };
 
-  const displayMonthName = monthNames[displayMonthIndex];
+  useEffect(() => {
+    loadEvents();
+    window.addEventListener("vocaflow:events-changed", loadEvents);
+    return () => window.removeEventListener("vocaflow:events-changed", loadEvents);
+  }, []);
 
   const summariesByDay = useMemo(() => {
     const map: Record<number, string[]> = {};
@@ -65,66 +67,57 @@ export default function Home() {
 
   const switchView = (viewName: ViewName, dayNum: number | null = null) => {
     setActiveView(viewName);
-    setSelectedDay(dayNum);
-    setOpenPicker(null);
+    if (viewName === "day" && dayNum === null && selectedDay === null) {
+      setSelectedDay(effectiveDay);
+    } else if (dayNum !== null) {
+      setSelectedDay(dayNum);
+    }
   };
 
-  const selectYear = (year: number, commit = true) => {
+  const selectYear = (year: number) => {
     setDisplayYear(year);
     setSelectedDay(null);
-    if (commit) {
-      setOpenPicker(null);
-    }
   };
 
-  const selectMonth = (monthIndex: number, commit = true) => {
+  const selectMonth = (monthIndex: number) => {
     setDisplayMonthIndex(monthIndex);
     setSelectedDay(null);
-    if (commit) {
-      setOpenPicker(null);
-    }
   };
 
-  const headerTitle =
-    activeView === "year"
-      ? String(displayYear)
-      : activeView === "month"
-        ? displayMonthName
-        : selectedDay
-          ? `${displayMonthName} ${selectedDay}, ${displayYear}`
-          : "Your Schedule";
+  const selectDay = (day: number) => {
+    setSelectedDay(day);
+  };
 
-  const pickerType = activeView === "year" ? "year" : activeView === "month" ? "month" : null;
+  const effectiveDay = selectedDay ?? (displayYear === initialYear && displayMonthIndex === initialMonthIndex ? currentDate.getDate() : 1);
+  const daysInMonth = new Date(displayYear, displayMonthIndex + 1, 0).getDate();
 
   return (
     <>
       <main className="mx-auto w-full max-w-5xl px-6 pb-44 pt-8 transition-all duration-300 md:pl-24 md:pr-16 md:pt-16 lg:pl-24">
-        <header className="mb-8 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <header className="mb-16 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div className="relative">
-            {pickerType ? (
-              <button
-                className={`text-left text-5xl font-semibold leading-[56px] tracking-tight transition-colors hover:text-[#625f50] ${openPicker === pickerType ? "text-transparent" : "text-[#1c1b1b]"}`}
-                onClick={() => setOpenPicker(openPicker === pickerType ? null : pickerType)}
-              >
-                {headerTitle}
-              </button>
-            ) : (
-              <h1 className="text-5xl font-semibold leading-[56px] tracking-tight text-[#1c1b1b]">{headerTitle}</h1>
-            )}
-            {openPicker === "year" ? (
+            {activeView === "year" ? (
               <WheelPicker
                 options={yearOptions.map((year) => ({ label: String(year), value: year }))}
                 value={displayYear}
                 onSelect={selectYear}
               />
-            ) : null}
-            {openPicker === "month" ? (
+            ) : activeView === "month" ? (
               <WheelPicker
                 options={monthNames.map((month, index) => ({ label: month, value: index }))}
                 value={displayMonthIndex}
                 onSelect={selectMonth}
               />
-            ) : null}
+            ) : (
+              <WheelPicker
+                options={Array.from({ length: daysInMonth }, (_, i) => {
+                  const day = i + 1;
+                  return { label: `${displayMonthIndex + 1}-${day}`, value: day };
+                })}
+                value={effectiveDay}
+                onSelect={selectDay}
+              />
+            )}
           </div>
           <div className="mt-4 flex self-start rounded-full border border-[#e4e3da]/80 bg-[#f6f3f2] p-1 shadow-sm md:mt-0 md:self-auto">
             <button className={toggleClass(activeView === "year")} onClick={() => switchView("year")}>
@@ -174,12 +167,14 @@ function WheelPicker<T extends string | number>({
   options,
   value,
 }: {
-  onSelect: (value: T, commit?: boolean) => void;
+  onSelect: (value: T) => void;
   options: { label: string; value: T }[];
   value: T;
 }) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dragRef = useRef<{ startY: number; startScroll: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
   const itemHeight = 44;
 
   useEffect(() => {
@@ -189,32 +184,61 @@ function WheelPicker<T extends string | number>({
     }
   }, [options, value]);
 
-  const handleScroll = () => {
+  const snapToNearest = () => {
     const list = listRef.current;
-    if (!list) {
-      return;
-    }
+    if (!list) return;
+    const idx = Math.min(options.length - 1, Math.max(0, Math.round(list.scrollTop / itemHeight)));
+    list.scrollTo({ top: idx * itemHeight, behavior: "smooth" });
+    const opt = options[idx];
+    if (opt && opt.value !== value) onSelect(opt.value);
+  };
 
-    if (scrollTimerRef.current) {
-      clearTimeout(scrollTimerRef.current);
-    }
-
+  const handleScroll = () => {
+    if (dragging) return;
+    const list = listRef.current;
+    if (!list) return;
+    if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
     scrollTimerRef.current = setTimeout(() => {
-      const nextIndex = Math.min(options.length - 1, Math.max(0, Math.round(list.scrollTop / itemHeight)));
-      const nextOption = options[nextIndex];
-
-      if (nextOption && nextOption.value !== value) {
-        onSelect(nextOption.value, false);
-      }
+      const idx = Math.min(options.length - 1, Math.max(0, Math.round(list.scrollTop / itemHeight)));
+      const opt = options[idx];
+      if (opt && opt.value !== value) onSelect(opt.value);
     }, 80);
+  };
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    const list = listRef.current;
+    if (!list) return;
+    list.setPointerCapture(e.pointerId);
+    setDragging(true);
+    dragRef.current = { startY: e.clientY, startScroll: list.scrollTop };
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!dragRef.current) return;
+    const list = listRef.current;
+    if (!list) return;
+    const dy = dragRef.current.startY - e.clientY;
+    list.scrollTop = dragRef.current.startScroll + dy;
+  };
+
+  const handlePointerUp = () => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    setDragging(false);
+    snapToNearest();
   };
 
   return (
     <div className="absolute left-0 top-1/2 z-50 w-48 -translate-y-1/2 overflow-hidden">
       <div
-        className="vf-wheel-mask relative h-[84px] snap-y snap-mandatory scroll-smooth overflow-y-auto py-[14px] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className={`vf-wheel-mask relative h-[84px] overflow-y-auto py-[14px] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${dragging ? "" : "snap-y snap-mandatory"}`}
         onScroll={handleScroll}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
         ref={listRef}
+        style={{ touchAction: "none" }}
       >
         {options.map((option) => {
           const active = option.value === value;
@@ -227,7 +251,7 @@ function WheelPicker<T extends string | number>({
                   : "relative z-20 flex h-11 w-full snap-center items-center justify-start text-5xl font-semibold leading-[56px] tracking-tight text-[#625f50] opacity-45 transition-opacity duration-150 ease-out"
               }
               key={String(option.value)}
-              onClick={() => onSelect(option.value, true)}
+              onClick={() => onSelect(option.value)}
             >
               {option.label}
             </button>

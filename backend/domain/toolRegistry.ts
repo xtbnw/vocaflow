@@ -1,12 +1,15 @@
 import type { ZodSchema } from "zod";
 import {
+  type CalendarEvent,
+  CalendarEventSchema,
   type CreateEventArgs,
   CreateEventArgsSchema,
-  type QueryEventsArgs,
-  QueryEventsArgsSchema,
   type FindEventsForDeleteArgs,
   FindEventsForDeleteArgsSchema,
+  type QueryEventsArgs,
+  QueryEventsArgsSchema,
 } from "./calendarTypes";
+import type { CalendarRepository } from "./calendarRepository";
 
 export interface ToolDescriptor {
   readonly name: string;
@@ -72,25 +75,101 @@ export class ToolRegistry {
   }
 }
 
-export const createEventHandler = async (args: unknown) => {
-  const a = args as CreateEventArgs;
-  return { tool: "create_event" as const, message: "placeholder: would create event", args: a };
-};
+// -- Real handlers (client-side, with CalendarRepository) --
 
-export const queryEventsHandler = async (args: unknown) => {
-  const a = args as QueryEventsArgs;
-  return { tool: "query_events" as const, message: "placeholder: would query events", args: a };
-};
+function newId(): string {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
-export const findEventsForDeleteHandler = async (args: unknown) => {
-  const a = args as FindEventsForDeleteArgs;
-  return { tool: "find_events_for_delete" as const, message: "placeholder: would find candidates for delete", args: a };
-};
+function defaultEndAt(startAt: string): string {
+  return new Date(new Date(startAt).getTime() + 3_600_000).toISOString();
+}
 
-export function createDefaultToolRegistry(): ToolRegistry {
+export const createEventHandler = (repo: CalendarRepository) =>
+  async (args: unknown) => {
+    const a = args as CreateEventArgs;
+    const now = new Date().toISOString();
+    const event: CalendarEvent = CalendarEventSchema.parse({
+      id: newId(),
+      title: a.title,
+      startAt: a.startAt,
+      endAt: a.endAt ?? defaultEndAt(a.startAt),
+      location: a.location,
+      notes: a.notes,
+      reminderMinutesBefore: a.reminderMinutesBefore,
+      source: "text",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const saved = await repo.save(event);
+    return { action: "created", event: saved };
+  };
+
+export const queryEventsHandler = (repo: CalendarRepository) =>
+  async (args: unknown) => {
+    const a = args as QueryEventsArgs;
+    const all = await repo.list();
+    let filtered = all.filter(
+      (e) => e.startAt >= a.rangeStartAt && e.startAt < a.rangeEndAt,
+    );
+    if (a.keyword) {
+      const kw = a.keyword.toLowerCase();
+      filtered = filtered.filter(
+        (e) =>
+          e.title.toLowerCase().includes(kw) ||
+          (e.notes && e.notes.toLowerCase().includes(kw)),
+      );
+    }
+    filtered.sort((x, y) => x.startAt.localeCompare(y.startAt));
+    return { action: "queried", events: filtered };
+  };
+
+export const findEventsForDeleteHandler = (repo: CalendarRepository) =>
+  async (args: unknown) => {
+    const a = args as FindEventsForDeleteArgs;
+    const all = await repo.list();
+    let filtered = all;
+    if (a.rangeStartAt && a.rangeEndAt) {
+      filtered = filtered.filter(
+        (e) =>
+          e.startAt >= a.rangeStartAt! && e.startAt < a.rangeEndAt!,
+      );
+    }
+    if (a.keyword) {
+      const kw = a.keyword.toLowerCase();
+      filtered = filtered.filter(
+        (e) =>
+          e.title.toLowerCase().includes(kw) ||
+          (e.notes && e.notes.toLowerCase().includes(kw)),
+      );
+    }
+    return { action: "found_candidates", events: filtered };
+  };
+
+// -- Placeholder handlers (server-side) --
+
+const placeholderHandler =
+  (tool: string) => async (args: unknown) => {
+    return { tool, message: `placeholder: would execute ${tool}`, args };
+  };
+
+// -- Factory --
+
+export function createDefaultToolRegistry(repo?: CalendarRepository): ToolRegistry {
   const registry = new ToolRegistry();
-  registry.register({ name: "create_event", schema: CreateEventArgsSchema, handler: createEventHandler });
-  registry.register({ name: "query_events", schema: QueryEventsArgsSchema, handler: queryEventsHandler });
-  registry.register({ name: "find_events_for_delete", schema: FindEventsForDeleteArgsSchema, handler: findEventsForDeleteHandler });
+
+  if (repo) {
+    registry.register({ name: "create_event", schema: CreateEventArgsSchema, handler: createEventHandler(repo) });
+    registry.register({ name: "query_events", schema: QueryEventsArgsSchema, handler: queryEventsHandler(repo) });
+    registry.register({ name: "find_events_for_delete", schema: FindEventsForDeleteArgsSchema, handler: findEventsForDeleteHandler(repo) });
+  } else {
+    registry.register({ name: "create_event", schema: CreateEventArgsSchema, handler: placeholderHandler("create_event") });
+    registry.register({ name: "query_events", schema: QueryEventsArgsSchema, handler: placeholderHandler("query_events") });
+    registry.register({ name: "find_events_for_delete", schema: FindEventsForDeleteArgsSchema, handler: placeholderHandler("find_events_for_delete") });
+  }
+
   return registry;
 }
