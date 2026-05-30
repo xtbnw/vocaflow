@@ -89,7 +89,7 @@ Cannot understand the intent at all.
 ${userText}`;
 }
 
-function describeSchemaForPrompt(schema: unknown): string {
+export function describeSchemaForPrompt(schema: unknown): string {
   try {
     const zodSchema = schema as { shape?: Record<string, unknown> };
     if (!zodSchema.shape) return "{}";
