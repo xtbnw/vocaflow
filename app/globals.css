@@ -166,6 +166,11 @@
   animation: vf-scroll-text 15s linear infinite;
 }
 
+.vf-wheel-mask {
+  mask-image: linear-gradient(to bottom, transparent 0%, black 34%, black 66%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 34%, black 66%, transparent 100%);
+}
+
 @media (max-width: 480px) {
   .vf-voice-bar.expanded {
     width: min(400px, calc(100vw - 32px));

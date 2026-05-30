@@ -1,12 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { buildMonthGrid } from "@/frontend/components/calendar/buildMonthGrid";
+import { useEffect, useRef, useState } from "react";
 
 type ViewName = "year" | "month" | "day";
+type PickerName = "year" | "month" | null;
 
 const weekDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const leadingDays = [24, 25, 26, 27, 28, 29, 30];
-const monthDays = Array.from({ length: 31 }, (_, index) => index + 1);
+const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const currentDate = new Date();
+const initialYear = currentDate.getFullYear();
+const initialMonthIndex = currentDate.getMonth();
+const yearOptions = Array.from({ length: 201 }, (_, index) => initialYear - 100 + index);
 const summaries: Record<number, string[]> = {
   2: ["Team Sync"],
   5: ["Design Review"],
@@ -22,31 +27,78 @@ const dayEvents = [
   { time: "12:30", title: "Lunch w/ Alex", color: "bg-[#e5e2e1]" },
   { time: "18:00", title: "Gym session", color: "bg-[#fff9e6]" },
 ];
-const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 export default function Home() {
   const [activeView, setActiveView] = useState<ViewName>("month");
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
+  const [displayYear, setDisplayYear] = useState(initialYear);
+  const [displayMonthIndex, setDisplayMonthIndex] = useState(initialMonthIndex);
+  const [openPicker, setOpenPicker] = useState<PickerName>(null);
+
+  const displayMonthName = monthNames[displayMonthIndex];
 
   const switchView = (viewName: ViewName, dayNum: number | null = null) => {
     setActiveView(viewName);
     setSelectedDay(dayNum);
+    setOpenPicker(null);
   };
 
-  const header =
+  const selectYear = (year: number, commit = true) => {
+    setDisplayYear(year);
+    setSelectedDay(null);
+    if (commit) {
+      setOpenPicker(null);
+    }
+  };
+
+  const selectMonth = (monthIndex: number, commit = true) => {
+    setDisplayMonthIndex(monthIndex);
+    setSelectedDay(null);
+    if (commit) {
+      setOpenPicker(null);
+    }
+  };
+
+  const headerTitle =
     activeView === "year"
-      ? { title: "2023", subtitle: "Year Overview" }
-      : activeView === "day"
-        ? { title: selectedDay ? `October ${selectedDay}, 2023` : "Your Schedule", subtitle: "Day View" }
-        : { title: "Calendar", subtitle: "October 2023" };
+      ? String(displayYear)
+      : activeView === "month"
+        ? displayMonthName
+        : selectedDay
+          ? `${displayMonthName} ${selectedDay}, ${displayYear}`
+          : "Your Schedule";
+
+  const pickerType = activeView === "year" ? "year" : activeView === "month" ? "month" : null;
 
   return (
     <>
       <main className="mx-auto w-full max-w-5xl px-6 pb-44 pt-8 transition-all duration-300 md:pl-24 md:pr-16 md:pt-16 lg:pl-24">
         <header className="mb-8 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-          <div>
-            <p className="text-xs font-medium uppercase tracking-widest text-[#625f50]">{header.subtitle}</p>
-            <h1 className="text-5xl font-semibold leading-[56px] tracking-tight text-[#1c1b1b]">{header.title}</h1>
+          <div className="relative">
+            {pickerType ? (
+              <button
+                className={`text-left text-5xl font-semibold leading-[56px] tracking-tight transition-colors hover:text-[#625f50] ${openPicker === pickerType ? "text-transparent" : "text-[#1c1b1b]"}`}
+                onClick={() => setOpenPicker(openPicker === pickerType ? null : pickerType)}
+              >
+                {headerTitle}
+              </button>
+            ) : (
+              <h1 className="text-5xl font-semibold leading-[56px] tracking-tight text-[#1c1b1b]">{headerTitle}</h1>
+            )}
+            {openPicker === "year" ? (
+              <WheelPicker
+                options={yearOptions.map((year) => ({ label: String(year), value: year }))}
+                value={displayYear}
+                onSelect={selectYear}
+              />
+            ) : null}
+            {openPicker === "month" ? (
+              <WheelPicker
+                options={monthNames.map((month, index) => ({ label: month, value: index }))}
+                value={displayMonthIndex}
+                onSelect={selectMonth}
+              />
+            ) : null}
           </div>
           <div className="mt-4 flex self-start rounded-full border border-[#e4e3da]/80 bg-[#f6f3f2] p-1 shadow-sm md:mt-0 md:self-auto">
             <button className={toggleClass(activeView === "year")} onClick={() => switchView("year")}>
@@ -63,13 +115,20 @@ export default function Home() {
 
         <section className="relative w-full">
           <ViewPanel active={activeView === "month"}>
-            <MonthView onSelectDay={(day) => switchView("day", day)} />
+            <MonthView monthIndex={displayMonthIndex} onSelectDay={(day) => switchView("day", day)} year={displayYear} />
           </ViewPanel>
           <ViewPanel active={activeView === "day"}>
             <DayView />
           </ViewPanel>
           <ViewPanel active={activeView === "year"}>
-            <YearView onSelectMonth={() => switchView("month")} />
+            <YearView
+              monthIndex={displayMonthIndex}
+              onSelectMonth={(monthIndex) => {
+                selectMonth(monthIndex);
+                switchView("month");
+              }}
+              year={displayYear}
+            />
           </ViewPanel>
         </section>
       </main>
@@ -84,6 +143,75 @@ function toggleClass(active: boolean) {
     : "rounded-full px-4 py-1.5 text-xs font-medium uppercase tracking-widest text-[#49473f] transition-colors hover:bg-[#e5e2e1]/50";
 }
 
+function WheelPicker<T extends string | number>({
+  onSelect,
+  options,
+  value,
+}: {
+  onSelect: (value: T, commit?: boolean) => void;
+  options: { label: string; value: T }[];
+  value: T;
+}) {
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const itemHeight = 44;
+
+  useEffect(() => {
+    const selectedIndex = options.findIndex((option) => option.value === value);
+    if (selectedIndex >= 0) {
+      listRef.current?.scrollTo({ top: selectedIndex * itemHeight, behavior: "instant" });
+    }
+  }, [options, value]);
+
+  const handleScroll = () => {
+    const list = listRef.current;
+    if (!list) {
+      return;
+    }
+
+    if (scrollTimerRef.current) {
+      clearTimeout(scrollTimerRef.current);
+    }
+
+    scrollTimerRef.current = setTimeout(() => {
+      const nextIndex = Math.min(options.length - 1, Math.max(0, Math.round(list.scrollTop / itemHeight)));
+      const nextOption = options[nextIndex];
+
+      if (nextOption && nextOption.value !== value) {
+        onSelect(nextOption.value, false);
+      }
+    }, 80);
+  };
+
+  return (
+    <div className="absolute left-0 top-1/2 z-50 w-48 -translate-y-1/2 overflow-hidden">
+      <div
+        className="vf-wheel-mask relative h-[84px] snap-y snap-mandatory scroll-smooth overflow-y-auto py-[14px] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        onScroll={handleScroll}
+        ref={listRef}
+      >
+        {options.map((option) => {
+          const active = option.value === value;
+
+          return (
+            <button
+              className={
+                active
+                  ? "relative z-20 flex h-11 w-full snap-center items-center justify-start text-5xl font-semibold leading-[56px] tracking-tight text-[#625f50] opacity-100 transition-opacity duration-150 ease-out"
+                  : "relative z-20 flex h-11 w-full snap-center items-center justify-start text-5xl font-semibold leading-[56px] tracking-tight text-[#625f50] opacity-45 transition-opacity duration-150 ease-out"
+              }
+              key={String(option.value)}
+              onClick={() => onSelect(option.value, true)}
+            >
+              {option.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ViewPanel({ active, children }: { active: boolean; children: React.ReactNode }) {
   return (
     <div className={active ? "relative w-full translate-y-0 opacity-100 transition-all duration-300" : "pointer-events-none absolute w-full translate-y-2.5 opacity-0 transition-all duration-300"}>
@@ -92,7 +220,9 @@ function ViewPanel({ active, children }: { active: boolean; children: React.Reac
   );
 }
 
-function MonthView({ onSelectDay }: { onSelectDay: (day: number) => void }) {
+function MonthView({ monthIndex, onSelectDay, year }: { monthIndex: number; onSelectDay: (day: number) => void; year: number }) {
+  const monthCells = buildMonthGrid(year, monthIndex);
+
   return (
     <div className="vf-glass mx-auto mb-8 max-w-3xl rounded-3xl p-4 shadow-md md:p-6">
       <div className="mb-4 grid grid-cols-7 gap-2 md:gap-3">
@@ -103,13 +233,18 @@ function MonthView({ onSelectDay }: { onSelectDay: (day: number) => void }) {
         ))}
       </div>
       <div className="grid grid-cols-7 gap-2 md:gap-3">
-        {leadingDays.map((day) => (
-          <div className="flex flex-col items-start rounded-2xl p-3 opacity-30" key={`lead-${day}`}>
-            <span className="text-sm text-[#49473f]">{day}</span>
-          </div>
-        ))}
-        {monthDays.map((day) => {
-          const active = day === 15;
+        {monthCells.map((cell) => {
+          const active = cell.isCurrentMonth && cell.day === 15;
+          const summary = cell.isCurrentMonth ? summaries[cell.day] : null;
+
+          if (!cell.isCurrentMonth) {
+            return (
+              <div className="flex h-16 flex-col items-start rounded-2xl p-2.5 opacity-30 md:h-20" key={cell.isoDate}>
+                <span className="text-sm text-[#49473f]">{cell.day}</span>
+              </div>
+            );
+          }
+
           return (
             <button
               className={
@@ -117,15 +252,15 @@ function MonthView({ onSelectDay }: { onSelectDay: (day: number) => void }) {
                   ? "relative flex h-16 flex-col items-start overflow-hidden rounded-2xl border border-[#e8e2d0] bg-[#fff9e6] p-2.5 text-left shadow-sm transition-colors md:h-20"
                   : "group relative flex h-16 flex-col items-start overflow-hidden rounded-2xl border border-[#e4e3da]/80 p-2.5 text-left transition-colors hover:bg-[#e5e2e1]/30 md:h-20"
               }
-              key={day}
-              onClick={() => onSelectDay(day)}
+              key={cell.isoDate}
+              onClick={() => onSelectDay(cell.day)}
             >
               <span className={active ? "text-sm font-bold text-[#767263]" : "text-sm text-[#1c1b1b] transition-colors group-hover:text-[#625f50]"}>
-                {day}
+                {cell.day}
               </span>
-              {summaries[day] ? (
+              {summary ? (
                 <span className="mt-2 text-[10px] font-medium leading-tight text-[#49473f]/80 md:text-xs">
-                  {summaries[day].map((item) => (
+                  {summary.map((item) => (
                     <span className="block" key={item}>
                       {item}
                     </span>
@@ -157,29 +292,58 @@ function DayView() {
   );
 }
 
-function YearView({ onSelectMonth }: { onSelectMonth: () => void }) {
+function YearView({
+  monthIndex,
+  onSelectMonth,
+  year,
+}: {
+  monthIndex: number;
+  onSelectMonth: (monthIndex: number) => void;
+  year: number;
+}) {
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      {months.map((month) => {
-        const active = month === "Oct";
+      {monthNames.map((month, index) => {
+        const active = index === monthIndex;
+        const monthCells = buildMonthGrid(year, index);
+
         return (
           <button
             className={
               active
-                ? "vf-glass rounded-lg border border-[#e8e2d0] bg-[#fff9e6] p-4 text-left shadow-sm transition-colors"
-                : "vf-glass rounded-lg border border-[#e4e3da]/80 p-4 text-left transition-colors hover:bg-[#e5e2e1]/30"
+                ? "vf-glass rounded-lg border border-[#e8e2d0] bg-[#fff9e6] p-3 text-left shadow-sm transition-colors"
+                : "vf-glass rounded-lg border border-[#e4e3da]/80 p-3 text-left transition-colors hover:bg-[#e5e2e1]/30"
             }
             key={month}
-            onClick={onSelectMonth}
+            onClick={() => onSelectMonth(index)}
           >
-            <h3 className="mb-4 text-xs font-medium uppercase tracking-widest text-[#49473f]">{month}</h3>
-            <div className="grid grid-cols-7 gap-1">
-              {Array.from({ length: 30 }, (_, index) => (
-                <span
-                  className={`aspect-square rounded-sm ${active && index === 14 ? "bg-[#625f50]" : "bg-[#e5e2e1]"} opacity-50`}
-                  key={index}
-                />
+            <h3 className="mb-2 text-xs font-medium uppercase tracking-widest text-[#49473f]">{month}</h3>
+            <div className="mb-1 grid grid-cols-7 gap-0.5">
+              {weekDays.map((day) => (
+                <span className="text-center text-[8px] font-medium uppercase text-[#49473f]/50" key={day}>
+                  {day.slice(0, 1)}
+                </span>
               ))}
+            </div>
+            <div className="grid grid-cols-7 gap-0.5">
+              {monthCells.map((cell) => {
+                const isSelectedMonthToday = active && cell.isToday;
+
+                return (
+                  <span
+                    className={
+                      isSelectedMonthToday
+                        ? "flex aspect-square items-center justify-center rounded-full bg-[#625f50] text-[8px] font-semibold text-white"
+                        : cell.isCurrentMonth
+                          ? "flex aspect-square items-center justify-center rounded-sm text-[8px] font-medium text-[#1c1b1b]"
+                          : "flex aspect-square items-center justify-center rounded-sm text-[8px] text-[#49473f]/25"
+                    }
+                    key={cell.isoDate}
+                  >
+                    {cell.day}
+                  </span>
+                );
+              })}
             </div>
           </button>
         );
