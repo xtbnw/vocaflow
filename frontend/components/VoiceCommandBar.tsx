@@ -1,21 +1,59 @@
 "use client";
 
-import { Send, X } from "lucide-react";
-import { useRef, useState } from "react";
-import { CommandResultPanel } from "@/frontend/components/CommandResultPanel";
+import {
+  Send,
+  Mic,
+  CheckCircle2,
+  XCircle,
+  Wrench,
+  MessageCircle,
+  HelpCircle,
+  AlertTriangle,
+  X,
+  ChevronUp,
+} from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { Session, SessionMessage } from "@/backend/domain/sessionTypes";
 import type { OrchestratorResult } from "@/backend/app/commandOrchestrator";
 import type { ToolExecutionResult } from "@/backend/domain/toolExecutionResult";
+import {
+  createSession,
+  addMessage,
+  endSession,
+  makeUserMessage,
+  makeAssistantMessage,
+  makeToolMessage,
+} from "@/backend/app/sessionManager";
 import { ToolExecutor } from "@/backend/app/toolExecutor";
 import { createDefaultToolRegistry } from "@/backend/domain/toolRegistry";
 import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persistence/localStorageCalendarRepository";
 
-type CommandResult = OrchestratorResult | ToolExecutionResult;
+const SESSION_STORAGE_KEY = "vocaflow.currentSession";
+const COLLAPSE_DELAY_S = 10;
 
 export function VoiceCommandBar() {
-  const [voiceExpanded, setVoiceExpanded] = useState(true);
-  const [voiceText, setVoiceText] = useState("");
+  const [session, setSession] = useState<Session | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.status === "active" && Array.isArray(parsed.messages)) {
+        return parsed as Session;
+      }
+    } catch {
+      /* ignore */
+    }
+    return null;
+  });
+
+  const [inputText, setInputText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [result, setResult] = useState<CommandResult | null>(null);
+  const [collapsed, setCollapsed] = useState(false);
+  const [collapseCountdown, setCollapseCountdown] = useState<number | null>(null);
+
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const executorRef = useRef<ToolExecutor | null>(null);
   if (!executorRef.current) {
@@ -24,120 +62,257 @@ export function VoiceCommandBar() {
     executorRef.current = new ToolExecutor(registry, repo);
   }
 
-  const submitVoiceText = async (event: React.FormEvent<HTMLFormElement>) => {
+  // persist session
+  useEffect(() => {
+    if (!session || session.messages.length === 0) {
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+    } else {
+      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+    }
+  }, [session]);
+
+  // auto-scroll on new messages
+  useEffect(() => {
+    const el = messageListRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [session?.messages]);
+
+  // collapse countdown
+  useEffect(() => {
+    if (collapseCountdown === null || collapseCountdown <= 0) return;
+
+    countdownRef.current = setInterval(() => {
+      setCollapseCountdown((prev) => {
+        if (prev === null || prev <= 1) {
+          setCollapsed(true);
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      if (countdownRef.current) clearInterval(countdownRef.current);
+    };
+  }, [collapseCountdown]);
+
+  const clearSession = useCallback(() => {
+    setSession(null);
+    setCollapsed(false);
+    setCollapseCountdown(null);
+  }, []);
+
+  const submitText = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const text = voiceText.trim();
+    const text = inputText.trim();
     if (!text || isSubmitting) return;
 
     setIsSubmitting(true);
-    setResult(null);
+    setInputText("");
+    if (collapsed) setCollapsed(false);
+
+    const userMsg = makeUserMessage(text);
+    let cur = session ?? createSession();
+    const history = cur.messages; // messages before this one
+    cur = addMessage(cur, userMsg);
+    setSession(cur);
 
     try {
       const res = await fetch("/api/command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, messages: history }),
       });
       const data: OrchestratorResult = await res.json();
-      await handleResult(data);
+      await handleOrchestratorResult(data, cur, text);
     } catch {
-      setResult({ kind: "error", message: "请求失败，请稍后重试" });
+      const errMsg = makeAssistantMessage(
+        "请求失败，请稍后重试",
+        "unknown",
+      );
+      setSession((s) => (s ? addMessage(s, errMsg) : s));
     } finally {
       setIsSubmitting(false);
-      setVoiceText("");
     }
   };
 
-  async function handleResult(data: OrchestratorResult) {
-    if (data.kind === "tool_call") {
-      try {
-        const execResult = await executorRef.current!.execute(data.tool, data.arguments);
-        setResult(execResult);
-        if (execResult.success) {
-          window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
-        }
-      } catch {
-        setResult({
-          kind: "execution",
-          success: false,
-          tool: data.tool,
-          message: "工具执行失败",
-        });
+  async function handleOrchestratorResult(
+    data: OrchestratorResult,
+    currentSession: Session,
+    userText: string,
+  ) {
+    switch (data.kind) {
+      case "chat": {
+        const msg = makeAssistantMessage(data.message, "chat");
+        setSession(addMessage(currentSession, msg));
+        break;
       }
-    } else {
-      setResult(data);
+      case "clarification": {
+        const msg = makeAssistantMessage(
+          data.clarificationQuestion,
+          "clarification",
+        );
+        setSession(addMessage(currentSession, msg));
+        break;
+      }
+      case "unknown": {
+        const msg = makeAssistantMessage(
+          data.reason ?? "未能理解您的意图",
+          "unknown",
+        );
+        setSession(addMessage(currentSession, msg));
+        break;
+      }
+      case "error": {
+        const msg = makeAssistantMessage(data.message, "unknown");
+        setSession(addMessage(currentSession, msg));
+        break;
+      }
+      case "tool_call": {
+        const assistantMsg = makeAssistantMessage(
+          `正在执行${toolLabel(data.tool)}…`,
+          "tool_call",
+          data.tool,
+          data.arguments as Record<string, unknown>,
+        );
+        let cur = addMessage(currentSession, assistantMsg);
+
+        try {
+          const execResult: ToolExecutionResult = await executorRef.current!.execute(
+            data.tool,
+            data.arguments,
+          );
+          const toolMsg = makeToolMessage(
+            data.tool,
+            data.arguments as Record<string, unknown>,
+            execResult.success,
+            execResult.message,
+          );
+          cur = addMessage(cur, toolMsg);
+
+          if (execResult.success) {
+            window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
+          }
+        } catch {
+          const toolMsg = makeToolMessage(
+            data.tool,
+            data.arguments as Record<string, unknown>,
+            false,
+            "工具执行失败",
+          );
+          cur = addMessage(cur, toolMsg);
+        }
+
+        cur = endSession(cur);
+        setSession(cur);
+        setCollapseCountdown(COLLAPSE_DELAY_S);
+        break;
+      }
     }
   }
 
-  const dismissResult = () => setResult(null);
-
-  const placeholder = result?.kind === "clarification"
-    ? "补充信息..."
-    : "Type intent...";
+  const messages = session?.messages ?? [];
+  const hasMessages = messages.length > 0;
+  const showMessages = hasMessages && !collapsed;
+  const sessionCompleted = session?.status === "completed";
 
   return (
-    <div className="pointer-events-none fixed bottom-8 left-0 right-0 z-50 flex flex-col items-center gap-3 px-4">
-      <div
-        className={
-          voiceExpanded
-            ? "flex w-full max-w-2xl translate-y-0 flex-row items-center justify-center gap-2 opacity-100 transition-all duration-300"
-            : "pointer-events-none flex w-full max-w-2xl translate-y-4 flex-row items-center justify-center gap-2 opacity-0 transition-all duration-300"
-        }
-      >
-        <button className="vf-glass pointer-events-auto whitespace-nowrap rounded-full border border-[#625f50]/20 px-5 py-2 text-xs font-medium tracking-[0.05em] text-[#1c1b1b] shadow-sm transition-colors hover:bg-[#fff9e6]/50">
-          Allow (允许)
-        </button>
-        <button className="vf-glass pointer-events-auto whitespace-nowrap rounded-full border border-[#ba1a1a]/20 px-5 py-2 text-xs font-medium tracking-[0.05em] text-[#ba1a1a] shadow-sm transition-colors hover:bg-[#ffdad6]/50">
-          Decline (拒绝)
-        </button>
-        <button className="vf-glass pointer-events-auto whitespace-nowrap rounded-full border border-[#5f5f58]/20 px-5 py-2 text-xs font-medium tracking-[0.05em] text-[#1c1b1b] shadow-sm transition-colors hover:bg-[#e5e2e1]/50">
-          Modify (修改)
-        </button>
-      </div>
-
-      {result && <CommandResultPanel result={result} onDismiss={dismissResult} />}
-
-      <div className="pointer-events-auto flex w-full max-w-[760px] items-center justify-center gap-3">
-        <div className={`vf-glass vf-voice-bar ambient-glow relative flex h-16 items-center overflow-hidden rounded-full p-1 ${voiceExpanded ? "expanded pr-6" : ""}`}>
-          <button
-            className={`z-10 flex h-14 w-14 shrink-0 items-center justify-center rounded-full border border-white/50 shadow-sm transition-all duration-300 hover:scale-105 ${voiceExpanded ? "bg-[#ffdad6] text-[#93000a]" : "pulse-ring bg-[#fff9e6] text-[#1e1c11]"}`}
-            onClick={() => setVoiceExpanded((value) => !value)}
+    <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-50 flex flex-col items-center gap-2 px-4 pb-4">
+      {/* message stream */}
+      {showMessages && (
+        <div className="pointer-events-auto mb-2 flex w-full max-w-[760px] flex-col">
+          <div
+            className="vf-glass max-h-[40vh] overflow-y-auto rounded-2xl border border-white/30 p-3 shadow-sm"
+            ref={messageListRef}
           >
-            <VoiceMicIcon />
-          </button>
-          <div className={`flex h-full flex-1 items-center justify-between pl-4 transition-opacity duration-300 ${voiceExpanded ? "opacity-100" : "opacity-0"}`}>
-            <div className="flex h-6 w-16 shrink-0 items-end gap-1">
-              {[24, 16, 24, 12, 20, 8].map((height, index) => (
-                <div className="wave-bar w-1.5 rounded-full bg-[#625f50]" key={index} style={{ height }} />
-              ))}
+            {messages.map((msg) => (
+              <MessageBubble key={msg.id} message={msg} />
+            ))}
+          </div>
+
+          {/* collapse countdown bar */}
+          {sessionCompleted && collapseCountdown !== null && (
+            <div className="mt-2 flex items-center justify-between rounded-xl bg-[#f6f3f2]/90 px-4 py-2 text-xs text-[#49473f] backdrop-blur-sm">
+              <span>
+                会话已完成 · {collapseCountdown} 秒后自动收起
+              </span>
+              <button
+                className="rounded-full px-3 py-1 text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/50"
+                onClick={clearSession}
+              >
+                删除
+              </button>
             </div>
-            <div className="transcription-scroll relative ml-4 flex h-full flex-1 items-center overflow-hidden">
-              <div className="absolute inset-0 flex items-center">
-                <span className="animate-scroll whitespace-nowrap text-base text-[#1c1b1b]">
-                  &quot;Schedule a gym session for tomorrow evening...&quot;
-                </span>
-              </div>
-            </div>
-            <button className="ml-2 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[#5e5e5d] transition-colors hover:bg-[#e5e2e1]/50" onClick={() => setVoiceExpanded(false)}>
-              <X className="h-4 w-4" />
+          )}
+        </div>
+      )}
+
+      {/* collapsed session indicator */}
+      {collapsed && sessionCompleted && (
+        <div className="pointer-events-auto mb-2 flex w-full max-w-[760px] items-center justify-between rounded-xl bg-[#f6f3f2]/90 px-4 py-2 text-xs text-[#49473f] backdrop-blur-sm">
+          <span>上一次会话已完成</span>
+          <div className="flex gap-2">
+            <button
+              className="rounded-full px-3 py-1 transition-colors hover:bg-[#e5e2e1]/50"
+              onClick={() => {
+                setCollapsed(false);
+                setCollapseCountdown(null);
+              }}
+            >
+              展开
+            </button>
+            <button
+              className="rounded-full px-3 py-1 text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/50"
+              onClick={clearSession}
+            >
+              删除
             </button>
           </div>
         </div>
-        <form className="vf-glass flex h-16 min-w-0 flex-1 items-center rounded-full border border-white/30 px-5 shadow-sm transition-colors focus-within:border-[#625f50]/50" onSubmit={submitVoiceText}>
+      )}
+
+      {/* input bar */}
+      <div className="pointer-events-auto flex w-full max-w-[760px] items-center justify-center gap-3">
+        {/* voice mic button */}
+        <button
+          className="vf-glass flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-white/50 text-[#625f50] shadow-sm transition-all duration-200 hover:scale-105 hover:bg-[#fff9e6]"
+          onClick={() => {
+            // placeholder: voice input not yet implemented
+          }}
+        >
+          <Mic className="h-5 w-5" />
+        </button>
+
+        {/* text input */}
+        <form
+          className="vf-glass flex h-12 min-w-0 flex-1 items-center rounded-full border border-white/30 px-5 shadow-sm transition-colors focus-within:border-[#625f50]/50"
+          onSubmit={submitText}
+        >
           <input
             className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
-            onChange={(event) => setVoiceText(event.target.value)}
-            placeholder={isSubmitting ? "处理中..." : placeholder}
+            onChange={(e) => setInputText(e.target.value)}
+            placeholder={
+              isSubmitting
+                ? "处理中..."
+                : session?.status === "active" &&
+                    session.messages.some(
+                      (m) =>
+                        m.kind === "assistant" &&
+                        m.resultKind === "clarification",
+                    )
+                  ? "补充信息..."
+                  : "输入指令..."
+            }
             type="text"
-            value={voiceText}
+            value={inputText}
             disabled={isSubmitting}
           />
           <button
-            className="ml-3 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#fff9e6] text-[#625f50] transition-colors hover:bg-[#e8e2d0] disabled:cursor-not-allowed disabled:opacity-40"
-            disabled={!voiceText.trim() || isSubmitting}
+            className="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#fff9e6] text-[#625f50] transition-colors hover:bg-[#e8e2d0] disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!inputText.trim() || isSubmitting}
             type="submit"
           >
-            <Send className="h-4 w-4" />
+            <Send className="h-3.5 w-3.5" />
           </button>
         </form>
       </div>
@@ -145,13 +320,136 @@ export function VoiceCommandBar() {
   );
 }
 
-function VoiceMicIcon() {
-  return (
-    <svg aria-hidden="true" className="h-6 w-6" focusable="false" viewBox="0 0 24 24">
-      <path
-        d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3Zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.49 6-3.31 6-6.72h-1.7Z"
-        fill="currentColor"
-      />
-    </svg>
+// -- Message bubble renderers --
+
+function MessageBubble({ message }: { message: SessionMessage }) {
+  switch (message.kind) {
+    case "user":
+      return (
+        <div className="mb-2 flex justify-end">
+          <div className="max-w-[80%] rounded-2xl rounded-br-md bg-[#fff9e6] px-4 py-2.5 text-sm text-[#1c1b1b] shadow-sm">
+            {message.text}
+          </div>
+        </div>
+      );
+
+    case "assistant":
+      return (
+        <div className="mb-2 flex justify-start">
+          <div
+            className={`max-w-[85%] rounded-2xl rounded-bl-md px-4 py-2.5 text-sm shadow-sm ${
+              message.resultKind === "tool_call"
+                ? "bg-[#e8e2d0]/60 text-[#1c1b1b]"
+                : message.resultKind === "clarification"
+                  ? "bg-[#f6f3f2] text-[#1c1b1b] border border-[#e4e3da]/80"
+                  : message.resultKind === "unknown"
+                    ? "bg-[#ffdad6]/40 text-[#ba1a1a]"
+                    : "bg-[#f6f3f2] text-[#1c1b1b]"
+            }`}
+          >
+            <div className="mb-1 flex items-center gap-1.5">
+              {assistantIcon(message.resultKind)}
+              <span className="text-[10px] font-medium uppercase tracking-widest text-[#49473f]/60">
+                {assistantLabel(message.resultKind)}
+              </span>
+            </div>
+            <p>{message.content}</p>
+            {message.resultKind === "tool_call" && message.tool && (
+              <div className="mt-2 rounded-lg bg-white/50 px-3 py-1.5 text-[11px] text-[#625f50]">
+                <span className="font-medium">{toolLabel(message.tool)}</span>
+                {message.arguments && (
+                  <span className="ml-2 text-[#49473f]/60">
+                    {formatArgsSummary(message.arguments)}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+
+    case "tool":
+      return (
+        <div className="mb-2 flex justify-start">
+          <div
+            className={`max-w-[85%] rounded-2xl rounded-bl-md px-4 py-2.5 text-sm shadow-sm ${
+              message.success
+                ? "bg-[#e8f5e9]/80 text-[#1c1b1b]"
+                : "bg-[#ffdad6]/60 text-[#ba1a1a]"
+            }`}
+          >
+            <div className="mb-1 flex items-center gap-1.5">
+              {message.success ? (
+                <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+              ) : (
+                <XCircle className="h-3.5 w-3.5 text-red-500" />
+              )}
+              <span className="text-[10px] font-medium uppercase tracking-widest text-[#49473f]/60">
+                {message.success ? "执行成功" : "执行失败"}
+              </span>
+            </div>
+            <p>{message.message}</p>
+            <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[#49473f]/50">
+              <Wrench className="h-3 w-3" />
+              <span>{toolLabel(message.toolName)}</span>
+            </div>
+          </div>
+        </div>
+      );
+  }
+}
+
+// -- helpers --
+
+function assistantIcon(
+  kind: "clarification" | "chat" | "unknown" | "tool_call",
+) {
+  switch (kind) {
+    case "clarification":
+      return <HelpCircle className="h-3 w-3 text-[#625f50]" />;
+    case "chat":
+      return <MessageCircle className="h-3 w-3 text-[#625f50]" />;
+    case "unknown":
+      return <AlertTriangle className="h-3 w-3 text-[#ba1a1a]" />;
+    case "tool_call":
+      return <Wrench className="h-3 w-3 text-[#625f50]" />;
+  }
+}
+
+function assistantLabel(
+  kind: "clarification" | "chat" | "unknown" | "tool_call",
+) {
+  switch (kind) {
+    case "clarification":
+      return "需要补充";
+    case "chat":
+      return "对话";
+    case "unknown":
+      return "无法理解";
+    case "tool_call":
+      return "工具调用";
+  }
+}
+
+function toolLabel(tool: string): string {
+  switch (tool) {
+    case "create_event":
+      return "创建日程";
+    case "query_events":
+      return "查询日程";
+    case "find_events_for_delete":
+      return "查找待删除日程";
+    default:
+      return tool;
+  }
+}
+
+function formatArgsSummary(args: Record<string, unknown>): string {
+  const entries = Object.entries(args).filter(
+    ([, v]) => v !== undefined && v !== null && v !== "",
   );
+  if (entries.length === 0) return "";
+  const preview = entries.slice(0, 2).map(([k, v]) => `${k}: ${String(v)}`);
+  if (entries.length > 2) preview.push("…");
+  return preview.join(", ");
 }

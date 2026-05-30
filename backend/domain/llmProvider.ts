@@ -4,7 +4,12 @@ export interface LLMProviderConfig {
   model: string;
 }
 
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
 export interface LLMProvider {
   readonly config: LLMProviderConfig;
-  chat(prompt: string): Promise<string>;
+  chat(messages: ChatMessage[]): Promise<string>;
 }

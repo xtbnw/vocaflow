@@ -1,4 +1,4 @@
-import type { LLMProvider, LLMProviderConfig } from "../../domain/llmProvider";
+import type { LLMProvider, LLMProviderConfig, ChatMessage } from "../../domain/llmProvider";
 
 export class MockLLMProvider implements LLMProvider {
   readonly config: LLMProviderConfig;
@@ -7,7 +7,9 @@ export class MockLLMProvider implements LLMProvider {
     this.config = config;
   }
 
-  async chat(prompt: string): Promise<string> {
-    return `[MockLLM | ${this.config.model}] received: "${prompt.slice(0, 120)}${prompt.length > 120 ? "…" : ""}"`;
+  async chat(messages: ChatMessage[]): Promise<string> {
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    const preview = lastUser?.content.slice(0, 120) ?? "(empty)";
+    return `[MockLLM | ${this.config.model}] received ${messages.length} messages, last user: "${preview}${lastUser && lastUser.content.length > 120 ? "…" : ""}"`;
   }
 }

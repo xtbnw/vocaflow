@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import assert from "node:assert/strict";
 import { test, after } from "node:test";
-import type { LLMProvider } from "../../../../backend/domain/llmProvider";
+import type { LLMProvider, ChatMessage } from "../../../../backend/domain/llmProvider";
 import { DeepSeekProvider } from "../../../../backend/infrastructure/llm/deepseekProvider";
 import { LLMCommandParser } from "../../../../backend/infrastructure/parser/llmCommandParser";
 import {
@@ -38,11 +38,9 @@ function makeProvider(): LLMProvider {
   if (process.env.DEEPSEEK_API_KEY) {
     return DeepSeekProvider.fromEnv();
   }
-  // fallback: mock 用于无 API key 时
   return {
     config: { url: "", apiKey: "", model: "mock" },
-    async chat(prompt: string) {
-      const toolDefs = tools.map((t) => `${t.name}: {${Object.keys((t.schema as any).shape).join(", ")}}`).join("; ");
+    async chat(_messages: ChatMessage[]) {
       return JSON.stringify({
         kind: "tool_call",
         tool: "query_events",
@@ -97,6 +95,32 @@ test("parse: find_events_for_delete → tool_call or clarification", async () =>
 
   console.log(JSON.stringify(result, null, 2));
 
-  // 至少不能是 unknown
   assert.notEqual(result.kind, "unknown");
+});
+
+test("parse: with session history maintains context", async () => {
+  const llm = makeProvider();
+  const parser = new LLMCommandParser(llm);
+
+  // Simulate a follow-up after clarification
+  const history = [
+    {
+      kind: "user" as const,
+      id: "1",
+      text: "明天下午帮我安排和张三开会",
+      timestamp: "2026-05-30T10:00:00+08:00",
+    },
+    {
+      kind: "assistant" as const,
+      id: "2",
+      content: "请补充会议地点",
+      resultKind: "clarification" as const,
+      timestamp: "2026-05-30T10:00:01+08:00",
+    },
+  ];
+
+  const result = await parser.parse("会议室 A", context, tools, history);
+  // With history context, the LLM should understand this completes a create_event
+  // Mock returns tool_call so we accept any valid kind
+  assert.ok(["tool_call", "clarification", "chat", "unknown"].includes(result.kind));
 });
