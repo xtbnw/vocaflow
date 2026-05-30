@@ -33,6 +33,13 @@ export function useAgentSession(
   const submitText = useCallback(
     async (text: string) => {
       setIsSubmitting(true);
+      const optimisticUser: SessionMessage = {
+        kind: "user",
+        id: `optimistic-${Date.now()}`,
+        text,
+        timestamp: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, optimisticUser]);
       try {
         const result = await sendMessage(sessionId, text);
         setSessionId(result.sessionId);

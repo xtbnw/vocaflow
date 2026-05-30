@@ -1,9 +1,4 @@
-export type ParseResult =
-  | ToolCallResult
-  | ClarificationResult
-  | ChatResult
-  | UnknownResult
-  | FinishResult;
+export type ParseResult = ToolCallResult | MessageResult;
 
 export interface ToolCallResult {
   kind: "tool_call";
@@ -12,23 +7,7 @@ export interface ToolCallResult {
   confidence?: number;
 }
 
-export interface ClarificationResult {
-  kind: "clarification";
-  clarificationQuestion: string;
-  missingFields?: string[];
-}
-
-export interface ChatResult {
-  kind: "chat";
-  message: string;
-}
-
-export interface UnknownResult {
-  kind: "unknown";
-  reason?: string;
-}
-
-export interface FinishResult {
-  kind: "finish";
-  message: string;
+export interface MessageResult {
+  kind: "message";
+  content: string;
 }

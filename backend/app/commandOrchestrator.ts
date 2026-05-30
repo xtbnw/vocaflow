@@ -10,10 +10,7 @@ import {
 } from "./parserUtils";
 
 export type OrchestratorResult =
-  | { kind: "chat"; message: string }
-  | { kind: "finish"; message: string }
-  | { kind: "clarification"; clarificationQuestion: string; missingFields?: string[] }
-  | { kind: "unknown"; reason?: string }
+  | { kind: "message"; content: string }
   | { kind: "tool_call"; tool: string; arguments: unknown; confidence?: number }
   | { kind: "error"; message: string };
 
@@ -32,7 +29,6 @@ export class CommandOrchestrator {
     const tools = this.registry.listDescriptors();
     const result = await this.parser.parse(userText, context, tools, history);
 
-    if (result.kind === "finish") return result;
     if (result.kind !== "tool_call") return result;
 
     return this.validateAndFix(userText, result, context, history);
@@ -79,7 +75,7 @@ export class CommandOrchestrator {
       history,
     );
 
-    if (attribution.kind === "clarification") return attribution;
+    if (attribution.kind === "message") return attribution;
 
     return this.validateAndFix(
       userText,
@@ -98,7 +94,7 @@ export class CommandOrchestrator {
     context: ParserContext,
     history: readonly SessionMessage[] = [],
   ): Promise<
-    | { kind: "clarification"; clarificationQuestion: string; missingFields: string[] }
+    | { kind: "message"; content: string }
     | { kind: "tool_call"; arguments: Record<string, unknown> }
   > {
     const messages = buildAttributionMessages(
@@ -117,9 +113,8 @@ export class CommandOrchestrator {
       return validateAttributionResult(parsed);
     } catch {
       return {
-        kind: "clarification",
-        clarificationQuestion: "请再描述一下您的需求，我没有完全理解。",
-        missingFields: [],
+        kind: "message",
+        content: "请再描述一下您的需求，我没有完全理解。",
       };
     }
   }
@@ -152,7 +147,7 @@ Classify the error as ONE of:
 Output ONLY one JSON object — no markdown, no backticks, no explanation.
 
 If A:
-{"kind": "clarification", "clarificationQuestion": "<one clear question in the user's language asking for the missing info>", "missingFields": ["field1"]}
+{"kind": "message", "content": "<one natural question in the user's language asking for the missing info>"}
 
 If B:
 {"kind": "tool_call", "arguments": { ...corrected arguments using only user-provided info } }`;
@@ -166,8 +161,8 @@ If B:
       messages.push({ role: "user", content: msg.text });
     } else if (msg.kind === "assistant") {
       let content = msg.content;
-      if (msg.resultKind === "tool_call" && msg.tool) {
-        content = `[Intent: execute ${msg.tool} with ${JSON.stringify(msg.arguments ?? {})}] ${content}`;
+      if (msg.toolCall) {
+        content = `[Intent: execute ${msg.toolCall.tool} with ${JSON.stringify(msg.toolCall.arguments)}] ${content}`;
       }
       messages.push({ role: "assistant", content });
     } else if (msg.kind === "tool") {
@@ -189,13 +184,12 @@ If B:
 function validateAttributionResult(
   parsed: unknown,
 ):
-  | { kind: "clarification"; clarificationQuestion: string; missingFields: string[] }
+  | { kind: "message"; content: string }
   | { kind: "tool_call"; arguments: Record<string, unknown> } {
   if (!parsed || typeof parsed !== "object") {
     return {
-      kind: "clarification",
-      clarificationQuestion: "请再描述一下您的需求，我没有完全理解。",
-      missingFields: [],
+      kind: "message",
+      content: "请再描述一下您的需求，我没有完全理解。",
     };
   }
 
@@ -212,13 +206,10 @@ function validateAttributionResult(
   }
 
   return {
-    kind: "clarification",
-    clarificationQuestion:
-      typeof obj.clarificationQuestion === "string"
-        ? obj.clarificationQuestion
+    kind: "message",
+    content:
+      typeof obj.content === "string"
+        ? obj.content
         : "请再描述一下您的需求，我没有完全理解。",
-    missingFields: Array.isArray(obj.missingFields)
-      ? obj.missingFields.filter((f): f is string => typeof f === "string")
-      : [],
   };
 }

@@ -20,9 +20,10 @@ export interface AssistantMessage {
   kind: "assistant";
   id: string;
   content: string;
-  resultKind: "clarification" | "chat" | "unknown" | "tool_call" | "finish";
-  tool?: string;
-  arguments?: Record<string, unknown>;
+  toolCall?: {
+    tool: string;
+    arguments: Record<string, unknown>;
+  };
   timestamp: string;
 }
 
@@ -60,9 +61,10 @@ export const AssistantMessageSchema = z.object({
   kind: z.literal("assistant"),
   id: z.string().min(1),
   content: z.string(),
-  resultKind: z.enum(["clarification", "chat", "unknown", "tool_call", "finish"]),
-  tool: z.string().optional(),
-  arguments: z.record(z.string(), z.unknown()).optional(),
+  toolCall: z.object({
+    tool: z.string(),
+    arguments: z.record(z.string(), z.unknown()),
+  }).optional(),
   timestamp: z.string(),
 });
 

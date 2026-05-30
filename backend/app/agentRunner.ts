@@ -118,7 +118,6 @@ export class AgentRunner {
       messages.push(
         makeAssistantMessage(
           `正在执行${toolLabel(decision.tool)}…`,
-          "tool_call",
           decision.tool,
           decision.arguments as Record<string, unknown>,
         ),
@@ -171,7 +170,7 @@ export class AgentRunner {
     message: string,
   ): AgentRunResult {
     return {
-      messages: [...history, makeAssistantMessage(message, "unknown")],
+      messages: [...history, makeAssistantMessage(message)],
       eventsChanged: false,
     };
   }
@@ -180,20 +179,10 @@ export class AgentRunner {
 function toAssistantMessage(
   decision: Exclude<OrchestratorResult, { kind: "tool_call" }>,
 ) {
-  switch (decision.kind) {
-    case "chat":
-    case "finish":
-      return makeAssistantMessage(decision.message, decision.kind);
-    case "clarification":
-      return makeAssistantMessage(
-        decision.clarificationQuestion,
-        "clarification",
-      );
-    case "unknown":
-      return makeAssistantMessage(decision.reason ?? "未能理解您的意图", "unknown");
-    case "error":
-      return makeAssistantMessage(decision.message, "unknown");
+  if (decision.kind === "error") {
+    return makeAssistantMessage(decision.message);
   }
+  return makeAssistantMessage(decision.content);
 }
 
 function toolLabel(tool: string): string {

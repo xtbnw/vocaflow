@@ -7,9 +7,6 @@ import {
   CheckCircle2,
   XCircle,
   Wrench,
-  MessageCircle,
-  HelpCircle,
-  AlertTriangle,
   ChevronUp,
   ChevronDown,
   Trash2,
@@ -194,17 +191,7 @@ export function VoiceCommandBar() {
           <input
             className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
             onChange={(e) => setInputText(e.target.value)}
-            placeholder={
-              isSubmitting
-                ? "处理中..."
-                : messages.some(
-                      (m) =>
-                        m.kind === "assistant" &&
-                        m.resultKind === "clarification",
-                    )
-                  ? "补充信息..."
-                  : "输入指令..."
-            }
+            placeholder={isSubmitting ? "处理中..." : "输入指令..."}
             type="text"
             value={inputText}
             disabled={isSubmitting}
@@ -238,32 +225,26 @@ function MessageBubble({ message }: { message: SessionMessage }) {
         <div className="mb-2 flex justify-start">
           <div
             className={`max-w-[85%] rounded-2xl rounded-bl-md px-4 py-2.5 text-sm shadow-sm ${
-              message.resultKind === "tool_call"
+              message.toolCall
                 ? "bg-[#e8e2d0]/60 text-[#1c1b1b]"
-                : message.resultKind === "clarification"
-                  ? "bg-[#f6f3f2] text-[#1c1b1b] border border-[#e4e3da]/80"
-                  : message.resultKind === "finish"
-                    ? "bg-[#e8f5e9]/80 text-[#1c1b1b]"
-                    : message.resultKind === "unknown"
-                      ? "bg-[#ffdad6]/40 text-[#ba1a1a]"
-                      : "bg-[#f6f3f2] text-[#1c1b1b]"
+                : "bg-[#f6f3f2] text-[#1c1b1b]"
             }`}
           >
-            <div className="mb-1 flex items-center gap-1.5">
-              {assistantIcon(message.resultKind)}
-              <span className="text-[10px] font-medium uppercase tracking-widest text-[#49473f]/60">
-                {assistantLabel(message.resultKind)}
-              </span>
-            </div>
+            {message.toolCall && (
+              <div className="mb-1 flex items-center gap-1.5">
+                <Wrench className="h-3 w-3 text-[#625f50]" />
+                <span className="text-[10px] font-medium uppercase tracking-widest text-[#49473f]/60">
+                  工具调用
+                </span>
+              </div>
+            )}
             <p>{message.content}</p>
-            {message.resultKind === "tool_call" && message.tool && (
+            {message.toolCall && (
               <div className="mt-2 rounded-lg bg-white/50 px-3 py-1.5 text-[11px] text-[#625f50]">
-                <span className="font-medium">{toolLabel(message.tool)}</span>
-                {message.arguments && (
-                  <span className="ml-2 text-[#49473f]/60">
-                    {formatArgsSummary(message.arguments)}
-                  </span>
-                )}
+                <span className="font-medium">{toolLabel(message.toolCall.tool)}</span>
+                <span className="ml-2 text-[#49473f]/60">
+                  {formatArgsSummary(message.toolCall.arguments)}
+                </span>
               </div>
             )}
           </div>
@@ -298,40 +279,6 @@ function MessageBubble({ message }: { message: SessionMessage }) {
           </div>
         </div>
       );
-  }
-}
-
-function assistantIcon(
-  kind: "clarification" | "chat" | "unknown" | "tool_call" | "finish",
-) {
-  switch (kind) {
-    case "clarification":
-      return <HelpCircle className="h-3 w-3 text-[#625f50]" />;
-    case "chat":
-      return <MessageCircle className="h-3 w-3 text-[#625f50]" />;
-    case "finish":
-      return <CheckCircle2 className="h-3 w-3 text-green-600" />;
-    case "unknown":
-      return <AlertTriangle className="h-3 w-3 text-[#ba1a1a]" />;
-    case "tool_call":
-      return <Wrench className="h-3 w-3 text-[#625f50]" />;
-  }
-}
-
-function assistantLabel(
-  kind: "clarification" | "chat" | "unknown" | "tool_call" | "finish",
-) {
-  switch (kind) {
-    case "clarification":
-      return "需要补充";
-    case "chat":
-      return "对话";
-    case "finish":
-      return "完成";
-    case "unknown":
-      return "无法理解";
-    case "tool_call":
-      return "工具调用";
   }
 }
 

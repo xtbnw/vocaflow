@@ -99,7 +99,7 @@ test("runs read-only tools on the server until the agent finishes", async () => 
           rangeEndAt: "2026-05-31T00:00:00+08:00",
         },
       },
-      { kind: "finish", message: "查询完成" },
+      { kind: "message", content: "查询完成，今天有一个日程。" },
     ],
   );
 
@@ -160,7 +160,7 @@ test("resumes the server loop after a pending action is confirmed", async () => 
           endAt: "2026-05-30T16:00:00+08:00",
         },
       },
-      { kind: "finish", message: "创建完成" },
+      { kind: "message", content: "已创建日程。" },
     ],
   );
 

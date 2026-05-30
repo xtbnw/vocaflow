@@ -51,17 +51,15 @@ export function makeUserMessage(text: string): UserMessage {
 
 export function makeAssistantMessage(
   content: string,
-  resultKind: AssistantMessage["resultKind"],
   tool?: string,
   args?: Record<string, unknown>,
 ): AssistantMessage {
+  const toolCall = tool && args ? { tool, arguments: args } : undefined;
   return {
     kind: "assistant",
     id: newId(),
     content,
-    resultKind,
-    tool,
-    arguments: args,
+    toolCall,
     timestamp: new Date().toISOString(),
   };
 }

@@ -2,22 +2,17 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SessionStore } from "../../../backend/app/sessionStore";
 import { makeUserMessage } from "../../../backend/app/sessionManager";
-import type { AssistantMessage } from "../../../backend/domain/sessionTypes";
 
 test("continuous messages are not duplicated in session history", () => {
   const store = new SessionStore();
 
-  // First message
   const { session } = store.getOrCreate();
   const user1 = makeUserMessage("第一条消息");
   store.addMessage(session.id, user1);
 
-  // Simulate merging messages from AgentRunner (like the route does)
   const priorHistory = store.getMessages(session.id);
   const storedIds = new Set(priorHistory.map((m) => m.id));
 
-  // The runner returns priorHistory + userMessage + new assistant messages
-  // Nothing new to add since user1 is already stored
   const resultMessages = [user1];
 
   for (const msg of resultMessages) {
@@ -36,12 +31,11 @@ test("two user-assistant pairs produce clean history", () => {
 
   const { session } = store.getOrCreate();
 
-  // Round 1: simulate route logic
+  // Round 1
   const user1 = makeUserMessage("第一条");
   const prior1 = store.getMessages(session.id);
 
-  // runner returns prior + user1 + assistant1
-  const assistant1 = { kind: "assistant" as const, id: "a1", content: "回复1", resultKind: "chat" as const, timestamp: new Date().toISOString() };
+  const assistant1 = { kind: "assistant" as const, id: "a1", content: "回复1", timestamp: new Date().toISOString() };
   const result1 = [user1, assistant1];
 
   const storedIds1 = new Set(prior1.map((m) => m.id));
@@ -55,7 +49,7 @@ test("two user-assistant pairs produce clean history", () => {
   const user2 = makeUserMessage("第二条");
   const prior2 = store.getMessages(session.id);
 
-  const assistant2 = { kind: "assistant" as const, id: "a2", content: "回复2", resultKind: "chat" as const, timestamp: new Date().toISOString() };
+  const assistant2 = { kind: "assistant" as const, id: "a2", content: "回复2", timestamp: new Date().toISOString() };
   const result2 = [user1, assistant1, user2, assistant2];
 
   const storedIds2 = new Set(prior2.map((m) => m.id));
@@ -81,13 +75,8 @@ test("cross-session pending action validation is rejected", () => {
 
   store.bindPendingAction(s1.id, "pending-1");
 
-  // s2 cannot validate s1's pending action
   assert.equal(store.validatePendingAction(s2.id, "pending-1"), false);
-
-  // s1 can validate its own
   assert.equal(store.validatePendingAction(s1.id, "pending-1"), true);
-
-  // Non-existent session
   assert.equal(store.validatePendingAction("unknown-session", "pending-1"), false);
 });
 
@@ -121,23 +110,22 @@ test("deleteSession on unknown session returns empty array", () => {
   assert.deepEqual(ids, []);
 });
 
-test("clarification flow produces clean history", () => {
+test("assistant message flow produces clean history", () => {
   const store = new SessionStore();
   const { session } = store.getOrCreate();
 
-  // User asks a question that needs clarification
+  // User asks a question
   const user1 = makeUserMessage("明天下午开会讨论项目");
   const prior1 = store.getMessages(session.id);
 
-  // Runner returns: prior + user1 + clarification
-  const clarification = {
+  // Runner returns: prior + user1 + assistant asking for more info
+  const clarificationMsg = {
     kind: "assistant" as const,
     id: "a1",
     content: "请问会议几点开始？",
-    resultKind: "clarification" as const,
     timestamp: new Date().toISOString(),
   };
-  const result1 = [user1, clarification];
+  const result1 = [user1, clarificationMsg];
 
   const storedIds1 = new Set(prior1.map((m) => m.id));
   for (const msg of result1) {
@@ -148,24 +136,24 @@ test("clarification flow produces clean history", () => {
   const user2 = makeUserMessage("下午三点");
   const prior2 = store.getMessages(session.id);
 
-  // Runner returns: prior + user2 + tool_call + assistant
+  // Runner returns: prior + user2 + tool_call + assistant reply
   const toolCall = {
     kind: "assistant" as const,
     id: "a2",
     content: "正在创建日程…",
-    resultKind: "tool_call" as const,
-    tool: "create_event",
-    arguments: { title: "开会讨论项目", startAt: "2026-05-31T15:00:00+08:00" },
+    toolCall: {
+      tool: "create_event",
+      arguments: { title: "开会讨论项目", startAt: "2026-05-31T15:00:00+08:00" },
+    },
     timestamp: new Date().toISOString(),
   };
-  const finish = {
+  const finishMsg = {
     kind: "assistant" as const,
     id: "a3",
     content: "已创建日程",
-    resultKind: "finish" as const,
     timestamp: new Date().toISOString(),
   };
-  const result2 = [user1, clarification, user2, toolCall, finish];
+  const result2 = [user1, clarificationMsg, user2, toolCall, finishMsg];
 
   const storedIds2 = new Set(prior2.map((m) => m.id));
   for (const msg of result2) {
@@ -176,9 +164,8 @@ test("clarification flow produces clean history", () => {
   assert.equal(finalMessages.length, 5);
   assert.equal(finalMessages[0].kind, "user");
   assert.equal(finalMessages[1].kind, "assistant");
-  assert.equal((finalMessages[1] as AssistantMessage).resultKind, "clarification");
   assert.equal(finalMessages[2].kind, "user");
   assert.equal(finalMessages[2].text, "下午三点");
-  assert.equal((finalMessages[3] as AssistantMessage).resultKind, "tool_call");
-  assert.equal((finalMessages[4] as AssistantMessage).resultKind, "finish");
+  assert.equal(finalMessages[3].kind, "assistant");
+  assert.equal(finalMessages[4].kind, "assistant");
 });

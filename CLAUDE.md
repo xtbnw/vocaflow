@@ -153,6 +153,8 @@ components.json           # shadcn/ui 配置: new-york 风格, neutral 色系, l
 
 **API 契约**: 客户端发送 `{ sessionId?, text }` → 服务端返回 `{ sessionId, messages, pendingAction?, eventsChanged }`。
 
+**Agent Decision 协议**: 模型输出仅两种类型 — `tool_call` (调用工具) 和 `message` (自然语言回复)。模型自主决定追问、闲聊、失败说明和完成总结，后端负责 Tool schema 校验、PendingAction、冲突检查、删除前查询和 Loop 上限。
+
 **页面保持简约**: 不添加无关文案、装饰或交互。
 
 ### 关键依赖

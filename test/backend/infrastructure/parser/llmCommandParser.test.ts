@@ -28,15 +28,14 @@ function mockProvider(response: string | ((messages: ChatMessage[]) => string)):
   };
 }
 
-test("parse: create_event with missing endAt → clarification", async () => {
+test("parse: create_event with missing info → message", async () => {
   const parser = new LLMCommandParser(mockProvider(JSON.stringify({
-    kind: "clarification",
-    clarificationQuestion: "请问会议几点结束？",
-    missingFields: ["endAt"],
+    kind: "message",
+    content: "请问会议几点结束？",
   })));
 
   const result = await parser.parse("明天下午3点开会讨论项目进度", context, tools);
-  assert.equal(result.kind, "clarification");
+  assert.equal(result.kind, "message");
 });
 
 test("parse: query_events for next week → tool_call", async () => {
@@ -54,28 +53,27 @@ test("parse: query_events for next week → tool_call", async () => {
   assert.equal(result.kind, "tool_call");
 });
 
-test("parse: chat greeting → chat", async () => {
+test("parse: greeting → message", async () => {
   const parser = new LLMCommandParser(mockProvider(JSON.stringify({
-    kind: "chat",
-    message: "你好！有什么可以帮助你的？",
+    kind: "message",
+    content: "你好！有什么可以帮助你的？",
   })));
 
   const result = await parser.parse("你好", context, tools);
-  assert.equal(result.kind, "chat");
+  assert.equal(result.kind, "message");
 });
 
-test("parse: nonsense → unknown", async () => {
+test("parse: nonsense → message", async () => {
   const parser = new LLMCommandParser(mockProvider(JSON.stringify({
-    kind: "unknown",
-    reason: "无法理解输入内容",
+    kind: "message",
+    content: "无法理解输入内容，请换一种说法。",
   })));
 
   const result = await parser.parse("asdfghjkl", context, tools);
-  assert.equal(result.kind, "unknown");
+  assert.equal(result.kind, "message");
 });
 
-test("parse: delete_event via multi-step → tool_call or clarification", async () => {
-  // LLM should respond with query_events first (2-step deletion pattern)
+test("parse: delete_event via multi-step → tool_call", async () => {
   const parser = new LLMCommandParser(mockProvider(JSON.stringify({
     kind: "tool_call",
     tool: "query_events",
@@ -88,7 +86,7 @@ test("parse: delete_event via multi-step → tool_call or clarification", async 
   })));
 
   const result = await parser.parse("删除明天下午3点开会讨论项目进度的日程", context, tools);
-  assert.notEqual(result.kind, "unknown");
+  assert.ok(result.kind === "tool_call" || result.kind === "message");
 });
 
 test("parse: with session history maintains context", async () => {
@@ -114,12 +112,11 @@ test("parse: with session history maintains context", async () => {
     {
       kind: "assistant" as const,
       id: "2",
-      content: "请补充会议地点",
-      resultKind: "clarification" as const,
+      content: "请问在哪里开会？",
       timestamp: "2026-05-30T10:00:01+08:00",
     },
   ];
 
   const result = await parser.parse("会议室 A", context, tools, history);
-  assert.ok(["tool_call", "clarification", "chat", "unknown", "finish"].includes(result.kind));
+  assert.ok(result.kind === "tool_call" || result.kind === "message");
 });
