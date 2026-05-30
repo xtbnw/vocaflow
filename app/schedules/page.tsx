@@ -1,47 +1,8 @@
-import { Bell, CalendarDays, CalendarRange, Keyboard, Mic, MoreHorizontal, Plus, Settings, UserCircle } from "lucide-react";
-
 export default function SchedulesPage() {
   return (
-    <main className="vf-shell min-h-screen overflow-x-hidden text-[#1c1b1b]">
-      <nav className="fixed left-0 top-0 z-50 hidden h-screen w-64 flex-col gap-6 border-r border-[#5f5f58]/10 bg-[#f6f3f2]/60 p-6 backdrop-blur-2xl md:flex">
-        <div className="mb-6">
-          <h1 className="text-5xl font-semibold tracking-tight">VocaFlow</h1>
-          <p className="mt-2 text-xs font-medium uppercase tracking-widest text-[#49473f]">AI Voice Assistant</p>
-        </div>
-        <button className="flex w-full items-center justify-center gap-2 rounded-full bg-[#fff9e6] px-4 py-3 text-xs font-medium uppercase tracking-widest text-[#767263]">
-          <Plus className="h-4 w-4" />
-          New Event
-        </button>
-        <div className="flex flex-1 flex-col gap-2">
-          <a className="flex items-center gap-3 rounded-lg bg-[#fff9e6] p-3 font-semibold text-[#767263]" href="/schedules">
-            <CalendarDays className="h-5 w-5" />
-            <span>Day</span>
-          </a>
-          <a className="flex items-center gap-3 rounded-lg p-3 text-[#49473f]" href="/schedules">
-            <CalendarRange className="h-5 w-5" />
-            <span>Week</span>
-          </a>
-          <a className="flex items-center gap-3 rounded-lg p-3 text-[#49473f]" href="/">
-            <CalendarRange className="h-5 w-5" />
-            <span>Month</span>
-          </a>
-        </div>
-        <a className="flex items-center gap-3 rounded-lg p-3 text-[#49473f]" href="/schedules">
-          <Settings className="h-5 w-5" />
-          <span>Settings</span>
-        </a>
-      </nav>
-
-      <section className="min-h-screen pb-32 md:ml-64">
-        <header className="sticky top-0 z-40 flex h-20 items-center justify-between border-b border-[#5f5f58]/10 bg-[#fcf9f8]/80 px-6 backdrop-blur-xl md:hidden">
-          <h1 className="text-2xl font-semibold tracking-tight">VocaFlow</h1>
-          <div className="flex gap-4 text-[#49473f]">
-            <Bell className="h-5 w-5" />
-            <UserCircle className="h-6 w-6" />
-          </div>
-        </header>
-
-        <div className="mx-auto max-w-5xl px-6 pt-12 md:px-16">
+    <>
+      <section className="min-h-screen pb-32 md:pl-24">
+        <div className="mx-auto max-w-5xl px-6 pt-12 md:px-16 md:pt-24">
           <div className="mb-12 flex flex-col justify-between gap-6 md:flex-row md:items-end">
             <div>
               <h2 className="text-4xl font-semibold tracking-tight md:text-5xl">My Schedules</h2>
@@ -130,20 +91,6 @@ export default function SchedulesPage() {
           </div>
         </div>
       </section>
-
-      <div className="fixed bottom-6 left-1/2 z-50 w-[90%] max-w-md -translate-x-1/2 md:ml-32">
-        <div className="vf-glass flex items-center justify-between rounded-full border border-[#625f50]/20 p-2 shadow-sm">
-          <button className="rounded-full p-3 text-[#49473f]">
-            <Keyboard className="h-5 w-5" />
-          </button>
-          <button className="flex h-14 w-14 items-center justify-center rounded-full bg-[#313030] text-white shadow-lg">
-            <Mic className="h-5 w-5" />
-          </button>
-          <button className="rounded-full p-3 text-[#49473f]">
-            <MoreHorizontal className="h-5 w-5" />
-          </button>
-        </div>
-      </div>
-    </main>
+    </>
   );
 }
