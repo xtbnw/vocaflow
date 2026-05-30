@@ -3,6 +3,7 @@
 import {
   Send,
   Mic,
+  MicOff,
   CheckCircle2,
   XCircle,
   Wrench,
@@ -27,6 +28,7 @@ import {
 import { ToolExecutor } from "@/backend/app/toolExecutor";
 import { createDefaultToolRegistry } from "@/backend/domain/toolRegistry";
 import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persistence/localStorageCalendarRepository";
+import { getASRProvider } from "@/backend/infrastructure/asr/asrProviderFactory";
 
 const SESSION_STORAGE_KEY = "vocaflow.currentSession";
 const COLLAPSE_DELAY_S = 10;
@@ -51,6 +53,12 @@ export function VoiceCommandBar() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [collapseCountdown, setCollapseCountdown] = useState<number | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  useEffect(() => {
+    const asr = getASRProvider();
+    setVoiceSupported(asr.isSupported());
+  }, []);
 
   const messageListRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -60,6 +68,11 @@ export function VoiceCommandBar() {
     const repo = new LocalStorageCalendarRepository();
     const registry = createDefaultToolRegistry(repo);
     executorRef.current = new ToolExecutor(registry, repo);
+  }
+
+  const asrRef = useRef<ReturnType<typeof getASRProvider>>(null);
+  if (!asrRef.current) {
+    asrRef.current = getASRProvider();
   }
 
   // persist session
@@ -100,6 +113,36 @@ export function VoiceCommandBar() {
     setSession(null);
     setCollapsed(false);
     setCollapseCountdown(null);
+  }, []);
+
+  // wire ASR callbacks
+  const committedRef = useRef("");
+  useEffect(() => {
+    const asr = asrRef.current;
+    if (!asr) return;
+
+    asr.onPartialResult = (text) => {
+      const prefix = committedRef.current;
+      setInputText(prefix ? `${prefix} ${text}` : text);
+    };
+
+    asr.onFinalResult = (text) => {
+      committedRef.current = committedRef.current
+        ? `${committedRef.current} ${text}`
+        : text;
+      setInputText(committedRef.current);
+    };
+
+    asr.onError = (message) => {
+      console.error("ASR error:", message);
+      setIsListening(false);
+    };
+
+    return () => {
+      asr.onPartialResult = null;
+      asr.onFinalResult = null;
+      asr.onError = null;
+    };
   }, []);
 
   const submitText = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -275,12 +318,42 @@ export function VoiceCommandBar() {
       <div className="pointer-events-auto flex w-full max-w-[760px] items-center justify-center gap-3">
         {/* voice mic button */}
         <button
-          className="vf-glass flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-white/50 text-[#625f50] shadow-sm transition-all duration-200 hover:scale-105 hover:bg-[#fff9e6]"
+          className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full border shadow-sm transition-all duration-200 ${
+            voiceSupported
+              ? isListening
+                ? "border-red-300 bg-red-100 text-red-500 animate-pulse"
+                : "vf-glass border-white/50 text-[#625f50] hover:scale-105 hover:bg-[#fff9e6]"
+              : "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
+          }`}
+          disabled={!voiceSupported}
           onClick={() => {
-            // placeholder: voice input not yet implemented
+            if (!voiceSupported) return;
+            const asr = asrRef.current;
+            if (!asr) return;
+
+            if (isListening) {
+              asr.stop();
+              setIsListening(false);
+            } else {
+              committedRef.current = "";
+              setInputText("");
+              asr.start();
+              setIsListening(true);
+            }
           }}
+          title={
+            voiceSupported
+              ? isListening
+                ? "停止录音"
+                : "语音输入"
+              : "浏览器不支持语音识别"
+          }
         >
-          <Mic className="h-5 w-5" />
+          {voiceSupported ? (
+            <Mic className="h-5 w-5" />
+          ) : (
+            <MicOff className="h-5 w-5" />
+          )}
         </button>
 
         {/* text input */}
