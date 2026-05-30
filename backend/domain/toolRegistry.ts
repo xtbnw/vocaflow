@@ -20,6 +20,11 @@ export interface ToolResult {
   error?: string;
 }
 
+export interface ParsedCommandInput {
+  tool: string;
+  arguments: unknown;
+}
+
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolDescriptor>();
 
@@ -34,20 +39,20 @@ export class ToolRegistry {
     return this.tools.get(name);
   }
 
-  async execute(name: string, args: unknown): Promise<ToolResult> {
-    const tool = this.tools.get(name);
+  async execute(command: ParsedCommandInput): Promise<ToolResult> {
+    const tool = this.tools.get(command.tool);
     if (!tool) {
       return {
         success: false,
-        error: `Unknown tool: "${name}". Available tools: ${[...this.tools.keys()].join(", ")}`,
+        error: `Unknown tool: "${command.tool}". Available tools: ${[...this.tools.keys()].join(", ")}`,
       };
     }
 
-    const parsed = tool.schema.safeParse(args);
+    const parsed = tool.schema.safeParse(command.arguments);
     if (!parsed.success) {
       return {
         success: false,
-        error: `Invalid arguments for tool "${name}": ${parsed.error!.message}`,
+        error: `Invalid arguments for tool "${command.tool}": ${parsed.error!.message}`,
       };
     }
 
