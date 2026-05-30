@@ -417,7 +417,7 @@ function MessageBubble({ message }: { message: SessionMessage }) {
                 {message.success ? "执行成功" : "执行失败"}
               </span>
             </div>
-            <p>{message.message}</p>
+            <p className="whitespace-pre-line">{message.message}</p>
             <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[#49473f]/50">
               <Wrench className="h-3 w-3" />
               <span>{toolLabel(message.toolName)}</span>
