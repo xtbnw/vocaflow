@@ -1,7 +1,9 @@
 "use client";
 
 import { buildMonthGrid } from "@/frontend/components/calendar/buildMonthGrid";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persistence/localStorageCalendarRepository";
+import type { CalendarEvent } from "@/backend/domain/calendarTypes";
 
 type ViewName = "year" | "month" | "day";
 type PickerName = "year" | "month" | null;
@@ -9,24 +11,16 @@ type PickerName = "year" | "month" | null;
 const weekDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const currentDate = new Date();
+const todayKey = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}-${String(currentDate.getDate()).padStart(2, "0")}`;
 const initialYear = currentDate.getFullYear();
 const initialMonthIndex = currentDate.getMonth();
 const yearOptions = Array.from({ length: 201 }, (_, index) => initialYear - 100 + index);
-const summaries: Record<number, string[]> = {
-  2: ["Team Sync"],
-  5: ["Design Review"],
-  8: ["Lunch w/ Alex"],
-  12: ["All Hands"],
-  15: ["Mentorship", "Gym"],
-  18: ["Project Due"],
-  22: ["1:1 Manager"],
-  26: ["Dentist"],
-};
-const dayEvents = [
-  { time: "09:00", title: "Morning standup", color: "bg-[#fff9e6]" },
-  { time: "12:30", title: "Lunch w/ Alex", color: "bg-[#e5e2e1]" },
-  { time: "18:00", title: "Gym session", color: "bg-[#fff9e6]" },
-];
+
+function toDateKey(year: number, monthIndex: number, day: number) {
+  return `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+const eventColors = ["bg-[#fff9e6]", "bg-[#e5e2e1]", "bg-[#e8e2d0]", "bg-[#f0ebe5]"];
 
 export default function Home() {
   const [activeView, setActiveView] = useState<ViewName>("month");
@@ -34,8 +28,40 @@ export default function Home() {
   const [displayYear, setDisplayYear] = useState(initialYear);
   const [displayMonthIndex, setDisplayMonthIndex] = useState(initialMonthIndex);
   const [openPicker, setOpenPicker] = useState<PickerName>(null);
+  const [events, setEvents] = useState<CalendarEvent[]>([]);
+
+  const repoRef = useRef<LocalStorageCalendarRepository | null>(null);
+  if (!repoRef.current) {
+    repoRef.current = new LocalStorageCalendarRepository();
+  }
+
+  useEffect(() => {
+    repoRef.current!.list().then(setEvents);
+  }, []);
 
   const displayMonthName = monthNames[displayMonthIndex];
+
+  const summariesByDay = useMemo(() => {
+    const map: Record<number, string[]> = {};
+    for (const event of events) {
+      const d = new Date(event.startAt);
+      if (d.getFullYear() === displayYear && d.getMonth() === displayMonthIndex) {
+        const day = d.getDate();
+        if (!map[day]) map[day] = [];
+        if (map[day].length < 3) map[day].push(event.title);
+      }
+    }
+    return map;
+  }, [events, displayYear, displayMonthIndex]);
+
+  const selectedDayKey = selectedDay ? toDateKey(displayYear, displayMonthIndex, selectedDay) : null;
+
+  const dayEvents = useMemo(() => {
+    if (!selectedDayKey) return [];
+    return events
+      .filter((e) => e.startAt.startsWith(selectedDayKey))
+      .sort((a, b) => a.startAt.localeCompare(b.startAt));
+  }, [events, selectedDayKey]);
 
   const switchView = (viewName: ViewName, dayNum: number | null = null) => {
     setActiveView(viewName);
@@ -115,10 +141,10 @@ export default function Home() {
 
         <section className="relative w-full">
           <ViewPanel active={activeView === "month"}>
-            <MonthView monthIndex={displayMonthIndex} onSelectDay={(day) => switchView("day", day)} year={displayYear} />
+            <MonthView monthIndex={displayMonthIndex} onSelectDay={(day) => switchView("day", day)} year={displayYear} summariesByDay={summariesByDay} todayKey={todayKey} />
           </ViewPanel>
           <ViewPanel active={activeView === "day"}>
-            <DayView />
+            <DayView events={dayEvents} />
           </ViewPanel>
           <ViewPanel active={activeView === "year"}>
             <YearView
@@ -220,7 +246,7 @@ function ViewPanel({ active, children }: { active: boolean; children: React.Reac
   );
 }
 
-function MonthView({ monthIndex, onSelectDay, year }: { monthIndex: number; onSelectDay: (day: number) => void; year: number }) {
+function MonthView({ monthIndex, onSelectDay, year, summariesByDay, todayKey }: { monthIndex: number; onSelectDay: (day: number) => void; year: number; summariesByDay: Record<number, string[]>; todayKey: string }) {
   const monthCells = buildMonthGrid(year, monthIndex);
 
   return (
@@ -234,8 +260,8 @@ function MonthView({ monthIndex, onSelectDay, year }: { monthIndex: number; onSe
       </div>
       <div className="grid grid-cols-7 gap-2 md:gap-3">
         {monthCells.map((cell) => {
-          const active = cell.isCurrentMonth && cell.day === 15;
-          const summary = cell.isCurrentMonth ? summaries[cell.day] : null;
+          const active = cell.isToday;
+          const summary = cell.isCurrentMonth ? summariesByDay[cell.day] : null;
 
           if (!cell.isCurrentMonth) {
             return (
@@ -276,17 +302,35 @@ function MonthView({ monthIndex, onSelectDay, year }: { monthIndex: number; onSe
   );
 }
 
-function DayView() {
+function DayView({ events }: { events: CalendarEvent[] }) {
+  if (events.length === 0) {
+    return (
+      <div className="vf-glass mx-auto max-w-2xl rounded-3xl p-6 shadow-md md:p-8">
+        <p className="text-center text-sm text-[#49473f]/60">这一天暂无日程安排</p>
+      </div>
+    );
+  }
+
   return (
     <div className="vf-glass mx-auto max-w-2xl rounded-3xl p-6 shadow-md md:p-8">
       <div className="flex flex-col gap-4">
-        {dayEvents.map((event) => (
-          <div className="flex gap-4 rounded-2xl border border-[#e4e3da]/80 bg-white/40 p-4" key={event.time}>
-            <div className="w-16 shrink-0 text-xs font-medium uppercase tracking-widest text-[#49473f]">{event.time}</div>
-            <div className={`h-12 w-1.5 shrink-0 rounded-full ${event.color}`} />
-            <div className="font-medium text-[#1c1b1b]">{event.title}</div>
-          </div>
-        ))}
+        {events.map((event, index) => {
+          const startAt = new Date(event.startAt);
+          const endAt = event.endAt ? new Date(event.endAt) : new Date(startAt.getTime() + 60 * 60 * 1000);
+          const timeLabel = `${String(startAt.getHours()).padStart(2, "0")}:${String(startAt.getMinutes()).padStart(2, "0")}`;
+          const durationMin = Math.round((endAt.getTime() - startAt.getTime()) / 60000);
+
+          return (
+            <div className="flex gap-4 rounded-2xl border border-[#e4e3da]/80 bg-white/40 p-4" key={event.id}>
+              <div className="w-16 shrink-0 text-xs font-medium uppercase tracking-widest text-[#49473f]">{timeLabel}</div>
+              <div className={`h-12 w-1.5 shrink-0 rounded-full ${eventColors[index % eventColors.length]}`} />
+              <div className="flex flex-col gap-0.5">
+                <div className="font-medium text-[#1c1b1b]">{event.title}</div>
+                <span className="text-[10px] font-medium uppercase tracking-widest text-[#5f5f58]">{durationMin}min</span>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
