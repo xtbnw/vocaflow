@@ -1,15 +1,28 @@
 "use client";
 
 import { Send, X } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { CommandResultPanel } from "@/frontend/components/CommandResultPanel";
 import type { OrchestratorResult } from "@/backend/app/commandOrchestrator";
+import type { ToolExecutionResult } from "@/backend/domain/toolExecutionResult";
+import { ToolExecutor } from "@/backend/app/toolExecutor";
+import { createDefaultToolRegistry } from "@/backend/domain/toolRegistry";
+import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persistence/localStorageCalendarRepository";
+
+type CommandResult = OrchestratorResult | ToolExecutionResult;
 
 export function VoiceCommandBar() {
   const [voiceExpanded, setVoiceExpanded] = useState(true);
   const [voiceText, setVoiceText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [result, setResult] = useState<OrchestratorResult | null>(null);
+  const [result, setResult] = useState<CommandResult | null>(null);
+
+  const executorRef = useRef<ToolExecutor | null>(null);
+  if (!executorRef.current) {
+    const repo = new LocalStorageCalendarRepository();
+    const registry = createDefaultToolRegistry(repo);
+    executorRef.current = new ToolExecutor(registry, repo);
+  }
 
   const submitVoiceText = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -26,7 +39,7 @@ export function VoiceCommandBar() {
         body: JSON.stringify({ text }),
       });
       const data: OrchestratorResult = await res.json();
-      setResult(data);
+      await handleResult(data);
     } catch {
       setResult({ kind: "error", message: "请求失败，请稍后重试" });
     } finally {
@@ -34,6 +47,24 @@ export function VoiceCommandBar() {
       setVoiceText("");
     }
   };
+
+  async function handleResult(data: OrchestratorResult) {
+    if (data.kind === "tool_call") {
+      try {
+        const execResult = await executorRef.current!.execute(data.tool, data.arguments);
+        setResult(execResult);
+      } catch {
+        setResult({
+          kind: "execution",
+          success: false,
+          tool: data.tool,
+          message: "工具执行失败",
+        });
+      }
+    } else {
+      setResult(data);
+    }
+  }
 
   const dismissResult = () => setResult(null);
 
