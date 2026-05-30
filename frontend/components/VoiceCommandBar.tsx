@@ -2,20 +2,44 @@
 
 import { Send, X } from "lucide-react";
 import { useState } from "react";
+import { CommandResultPanel } from "@/frontend/components/CommandResultPanel";
+import type { OrchestratorResult } from "@/backend/app/commandOrchestrator";
 
 export function VoiceCommandBar() {
   const [voiceExpanded, setVoiceExpanded] = useState(true);
   const [voiceText, setVoiceText] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [result, setResult] = useState<OrchestratorResult | null>(null);
 
-  const submitVoiceText = (event: React.FormEvent<HTMLFormElement>) => {
+  const submitVoiceText = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = voiceText.trim();
-    if (!text) {
-      return;
+    if (!text || isSubmitting) return;
+
+    setIsSubmitting(true);
+    setResult(null);
+
+    try {
+      const res = await fetch("/api/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const data: OrchestratorResult = await res.json();
+      setResult(data);
+    } catch {
+      setResult({ kind: "error", message: "请求失败，请稍后重试" });
+    } finally {
+      setIsSubmitting(false);
+      setVoiceText("");
     }
-    console.log("voice text submitted:", text);
-    setVoiceText("");
   };
+
+  const dismissResult = () => setResult(null);
+
+  const placeholder = result?.kind === "clarification"
+    ? "补充信息..."
+    : "Type intent...";
 
   return (
     <div className="pointer-events-none fixed bottom-8 left-0 right-0 z-50 flex flex-col items-center gap-3 px-4">
@@ -36,6 +60,8 @@ export function VoiceCommandBar() {
           Modify (修改)
         </button>
       </div>
+
+      {result && <CommandResultPanel result={result} onDismiss={dismissResult} />}
 
       <div className="pointer-events-auto flex w-full max-w-[760px] items-center justify-center gap-3">
         <div className={`vf-glass vf-voice-bar ambient-glow relative flex h-16 items-center overflow-hidden rounded-full p-1 ${voiceExpanded ? "expanded pr-6" : ""}`}>
@@ -67,13 +93,14 @@ export function VoiceCommandBar() {
           <input
             className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
             onChange={(event) => setVoiceText(event.target.value)}
-            placeholder="Type intent..."
+            placeholder={isSubmitting ? "处理中..." : placeholder}
             type="text"
             value={voiceText}
+            disabled={isSubmitting}
           />
           <button
             className="ml-3 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#fff9e6] text-[#625f50] transition-colors hover:bg-[#e8e2d0] disabled:cursor-not-allowed disabled:opacity-40"
-            disabled={!voiceText.trim()}
+            disabled={!voiceText.trim() || isSubmitting}
             type="submit"
           >
             <Send className="h-4 w-4" />
