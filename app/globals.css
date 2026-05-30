@@ -96,3 +96,113 @@
     @apply bg-background text-foreground;
   }
 }
+
+.vf-shell {
+  background-color: #fcf9f8;
+  background-image: radial-gradient(circle at 50% 0%, #fff9e6 0%, transparent 70%);
+  background-attachment: fixed;
+}
+
+.vf-glass {
+  background-color: rgb(255 255 255 / 70%);
+  border: 1px solid rgb(255 255 255 / 30%);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+}
+
+.ambient-glow {
+  box-shadow: 0 0 60px 20px rgb(255 249 230 / 60%);
+}
+
+.vf-voice-bar {
+  width: 80px;
+  transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.vf-voice-bar.expanded {
+  width: 400px;
+}
+
+.pulse-ring {
+  animation: vf-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.wave-bar {
+  animation: vf-wave 1.2s ease-in-out infinite alternate;
+  transform-origin: bottom;
+}
+
+.wave-bar:nth-child(1) {
+  animation-delay: -1.2s;
+}
+
+.wave-bar:nth-child(2) {
+  animation-delay: -1s;
+}
+
+.wave-bar:nth-child(3) {
+  animation-delay: -0.8s;
+}
+
+.wave-bar:nth-child(4) {
+  animation-delay: -0.6s;
+}
+
+.wave-bar:nth-child(5) {
+  animation-delay: -0.4s;
+}
+
+.wave-bar:nth-child(6) {
+  animation-delay: -0.2s;
+}
+
+.transcription-scroll {
+  mask-image: linear-gradient(to right, transparent, black 15%, black 85%, transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, black 15%, black 85%, transparent);
+}
+
+.animate-scroll {
+  display: inline-block;
+  animation: vf-scroll-text 15s linear infinite;
+}
+
+.vf-wheel-mask {
+  mask-image: linear-gradient(to bottom, transparent 0%, black 34%, black 66%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 34%, black 66%, transparent 100%);
+}
+
+@media (max-width: 480px) {
+  .vf-voice-bar.expanded {
+    width: min(400px, calc(100vw - 32px));
+  }
+}
+
+@keyframes vf-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.05);
+  }
+}
+
+@keyframes vf-wave {
+  0% {
+    transform: scaleY(0.2);
+  }
+  100% {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes vf-scroll-text {
+  0% {
+    transform: translateX(100%);
+  }
+  100% {
+    transform: translateX(-100%);
+  }
+}
