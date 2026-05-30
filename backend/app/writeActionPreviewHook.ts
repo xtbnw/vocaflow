@@ -59,30 +59,11 @@ function buildCreateEventPreview(
 function buildDeleteEventPreview(
   args: Record<string, unknown>,
 ): ActionPreview {
-  const items: ActionPreview["items"] = [];
-  if (args.rangeStartAt) {
-    items.push({
-      label: "开始时间",
-      value: formatLocalTime(args.rangeStartAt as string),
-    });
-  }
-  if (args.rangeEndAt) {
-    items.push({
-      label: "结束时间",
-      value: formatLocalTime(args.rangeEndAt as string),
-    });
-  }
-  if (args.keyword) {
-    items.push({
-      label: "关键词",
-      value: String(args.keyword),
-    });
-  }
-
+  const eventIds = (Array.isArray(args.eventIds) ? args.eventIds : []) as string[];
   return {
     title: "删除日程",
-    summary: "将删除匹配的日程",
-    items,
+    summary: `将删除 ${eventIds.length} 个日程`,
+    items: [{ label: "日程数量", value: `${eventIds.length} 个日程` }],
     warnings: ["该操作会永久删除日程，不可撤销"],
   };
 }

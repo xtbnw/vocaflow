@@ -4,8 +4,8 @@ import {
   CalendarEventSchema,
   type CreateEventArgs,
   CreateEventArgsSchema,
-  type FindEventsForDeleteArgs,
-  FindEventsForDeleteArgsSchema,
+  type DeleteEventArgs,
+  DeleteEventArgsSchema,
   type QueryEventsArgs,
   QueryEventsArgsSchema,
 } from "./calendarTypes";
@@ -127,26 +127,21 @@ export const queryEventsHandler = (repo: CalendarRepository) =>
     return { action: "queried", events: filtered };
   };
 
-export const findEventsForDeleteHandler = (repo: CalendarRepository) =>
+export const deleteEventHandler = (repo: CalendarRepository) =>
   async (args: unknown) => {
-    const a = args as FindEventsForDeleteArgs;
-    const all = await repo.list();
-    let filtered = all;
-    if (a.rangeStartAt && a.rangeEndAt) {
-      filtered = filtered.filter(
-        (e) =>
-          e.startAt >= a.rangeStartAt! && e.startAt < a.rangeEndAt!,
-      );
+    const a = args as DeleteEventArgs;
+    const results: { id: string; success: boolean }[] = [];
+    for (const id of a.eventIds) {
+      try {
+        await repo.delete(id);
+        results.push({ id, success: true });
+      } catch {
+        results.push({ id, success: false });
+      }
     }
-    if (a.keyword) {
-      const kw = a.keyword.toLowerCase();
-      filtered = filtered.filter(
-        (e) =>
-          e.title.toLowerCase().includes(kw) ||
-          (e.notes && e.notes.toLowerCase().includes(kw)),
-      );
-    }
-    return { action: "found_candidates", events: filtered };
+    const deleted = results.filter((r) => r.success).length;
+    const failed = results.filter((r) => !r.success).length;
+    return { action: "deleted", deleted, failed, results };
   };
 
 // -- Placeholder handlers (server-side) --
@@ -164,11 +159,11 @@ export function createDefaultToolRegistry(repo?: CalendarRepository): ToolRegist
   if (repo) {
     registry.register({ name: "create_event", schema: CreateEventArgsSchema, handler: createEventHandler(repo) });
     registry.register({ name: "query_events", schema: QueryEventsArgsSchema, handler: queryEventsHandler(repo) });
-    registry.register({ name: "find_events_for_delete", schema: FindEventsForDeleteArgsSchema, handler: findEventsForDeleteHandler(repo) });
+    registry.register({ name: "delete_event", schema: DeleteEventArgsSchema, handler: deleteEventHandler(repo) });
   } else {
     registry.register({ name: "create_event", schema: CreateEventArgsSchema, handler: placeholderHandler("create_event") });
     registry.register({ name: "query_events", schema: QueryEventsArgsSchema, handler: placeholderHandler("query_events") });
-    registry.register({ name: "find_events_for_delete", schema: FindEventsForDeleteArgsSchema, handler: placeholderHandler("find_events_for_delete") });
+    registry.register({ name: "delete_event", schema: DeleteEventArgsSchema, handler: placeholderHandler("delete_event") });
   }
 
   return registry;

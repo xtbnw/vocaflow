@@ -33,7 +33,7 @@ export class LLMCommandParser {
   }
 }
 
-const SYSTEM_INSTRUCTIONS = `You are a command parser for a voice calendar assistant. Analyze the user's input in the context of the conversation history and output exactly one JSON object.
+const SYSTEM_INSTRUCTIONS = `You are a command parser for a voice calendar assistant with multi-step reasoning capability. Analyze the user's input in the context of the full conversation history — including previous tool execution results — and output exactly one JSON object.
 
 ## Available Tools
 {{TOOLS}}
@@ -42,13 +42,26 @@ const SYSTEM_INSTRUCTIONS = `You are a command parser for a voice calendar assis
 - Current time: {{CURRENT_TIME}}
 - Timezone: {{TIMEZONE}}
 
+## Multi-Step Reasoning (ReAct)
+You may chain multiple tool calls to complete a complex request. After a tool executes, its result appears in the conversation as a [Tool Result] message. Analyze the result and decide the next action:
+
+1. If the result contains data needed for a follow-up action, call the next appropriate tool with arguments derived from those results.
+2. **CRITICAL — Deletion flow**: When the user wants to delete events (e.g., "删除今天的全部日程", "删除明天的会议"), you MUST follow this two-step pattern:
+   a. FIRST call query_events with the time range / keyword extracted from the user's words.
+   b. THEN call delete_event with the eventIds from the query result.
+   c. NEVER ask the user for event IDs — users don't know internal IDs. Always query first yourself.
+   d. If query_events returns no events, output "finish" saying no matching events were found.
+3. When the user's request is fully satisfied, output "finish" with a natural summary message in the user's language.
+4. Do NOT repeat a tool call that was just executed with identical arguments — this would cause an infinite loop.
+5. If the current user message is "请继续" (continue signal), review the last [Tool Result] and determine the next appropriate action to complete the user's original request.
+
 ## Task
-Classify the user's input into one of four kinds. Consider the full conversation history when interpreting the current message — the user may be answering a previous clarification question or adding detail to a prior request. Output ONLY the JSON — no markdown, no backticks, no explanations.
+Classify the user's input into one of five kinds. Consider ALL conversation history — user messages, assistant intent markers, AND tool execution results — when interpreting the current message. Output ONLY the JSON — no markdown, no backticks, no explanations.
 
 ## Kinds
 
 ### tool_call
-The user wants to execute a calendar tool. All required arguments must be extractable from the user's words combined with conversation history. If any required field is still missing, use "clarification" instead. Do NOT invent dates/times the user did not provide.
+The user wants to execute a calendar tool. All required arguments must be extractable from the user's words combined with conversation history (including tool results). If any required field is still missing, use "clarification" instead — EXCEPT for delete_event: never ask clarification about eventIds; query first instead.
 
 IMPORTANT — title field: use exactly what the user said about the event. Generic words like "开会", "见面", "聚餐", "讨论", "碰一下", "聊一聊" ARE valid titles — do NOT ask for a more specific topic. The user's own phrasing is the title.
 
@@ -57,6 +70,13 @@ IMPORTANT — title field: use exactly what the user said about the event. Gener
   "tool": "<tool name>",
   "arguments": { ...tool-specific fields },
   "confidence": 0.0-1.0
+}
+
+### finish
+The user's request has been fully completed. Use this to summarize the outcome after all necessary tool calls have been made. The message should be a natural, conversational summary in the user's language describing what was done.
+{
+  "kind": "finish",
+  "message": "<summary of what was accomplished>"
 }
 
 ### clarification
@@ -109,8 +129,12 @@ export function buildMessages(
         content = `[Intent: execute ${msg.tool} with ${JSON.stringify(msg.arguments ?? {})}] ${content}`;
       }
       messages.push({ role: "assistant", content });
+    } else if (msg.kind === "tool") {
+      messages.push({
+        role: "user",
+        content: `[Tool Result: ${msg.toolName} — ${msg.success ? "success" : "failed"}]\n${msg.message}`,
+      });
     }
-    // Tool messages are not sent to LLM — session ends after tool execution
   }
 
   messages.push({ role: "user", content: currentText });
@@ -176,7 +200,7 @@ export function extractJson(text: string): string {
   return text;
 }
 
-const VALID_KINDS = new Set(["tool_call", "clarification", "chat", "unknown"]);
+const VALID_KINDS = new Set(["tool_call", "clarification", "chat", "unknown", "finish"]);
 
 export function validateResult(parsed: unknown): ParseResult {
   if (!parsed || typeof parsed !== "object") {
@@ -219,6 +243,12 @@ export function validateResult(parsed: unknown): ParseResult {
         kind: "chat",
         message:
           typeof obj.message === "string" ? obj.message : "",
+      };
+
+    case "finish":
+      return {
+        kind: "finish",
+        message: typeof obj.message === "string" ? obj.message : "任务已完成",
       };
 
     case "unknown":

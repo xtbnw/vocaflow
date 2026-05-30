@@ -44,6 +44,12 @@ export function VoiceCommandBar() {
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [isExecutingPending, setIsExecutingPending] = useState(false);
 
+  const MAX_REACT_ITERATIONS = 20;
+  const sessionRef = useRef<Session | null>(null);
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
   useEffect(() => {
     const asr = getASRProvider();
     setVoiceSupported(asr.isSupported());
@@ -106,6 +112,18 @@ export function VoiceCommandBar() {
     };
   }, []);
 
+  async function callOrchestrator(
+    text: string,
+    history: readonly SessionMessage[],
+  ): Promise<OrchestratorResult> {
+    const res = await fetch("/api/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, messages: history }),
+    });
+    return (await res.json()) as OrchestratorResult;
+  }
+
   const submitText = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = inputText.trim();
@@ -120,20 +138,14 @@ export function VoiceCommandBar() {
     const history = cur.messages;
     cur = addMessage(cur, userMsg);
     setSession(cur);
+    sessionRef.current = cur;
 
     try {
-      const res = await fetch("/api/command", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, messages: history }),
-      });
-      const data: OrchestratorResult = await res.json();
-      await handleOrchestratorResult(data, cur, text);
+      const data = await callOrchestrator(text, cur.messages);
+      const finalSession = await handleOrchestratorResult(data, cur, text);
+      setSession(finalSession);
     } catch {
-      const errMsg = makeAssistantMessage(
-        "请求失败，请稍后重试",
-        "unknown",
-      );
+      const errMsg = makeAssistantMessage("请求失败，请稍后重试", "unknown");
       setSession((s) => (s ? addMessage(s, errMsg) : s));
     } finally {
       setIsSubmitting(false);
@@ -144,33 +156,33 @@ export function VoiceCommandBar() {
     data: OrchestratorResult,
     currentSession: Session,
     userText: string,
-  ) {
+    iteration = 0,
+  ): Promise<Session> {
+    if (iteration >= MAX_REACT_ITERATIONS) return currentSession;
+
     switch (data.kind) {
+      case "finish":
       case "chat": {
-        const msg = makeAssistantMessage(data.message, "chat");
-        setSession(addMessage(currentSession, msg));
-        break;
+        const msg = makeAssistantMessage(data.message, data.kind === "finish" ? "finish" : "chat");
+        return addMessage(currentSession, msg);
       }
       case "clarification": {
         const msg = makeAssistantMessage(
           data.clarificationQuestion,
           "clarification",
         );
-        setSession(addMessage(currentSession, msg));
-        break;
+        return addMessage(currentSession, msg);
       }
       case "unknown": {
         const msg = makeAssistantMessage(
           data.reason ?? "未能理解您的意图",
           "unknown",
         );
-        setSession(addMessage(currentSession, msg));
-        break;
+        return addMessage(currentSession, msg);
       }
       case "error": {
         const msg = makeAssistantMessage(data.message, "unknown");
-        setSession(addMessage(currentSession, msg));
-        break;
+        return addMessage(currentSession, msg);
       }
       case "tool_call": {
         const assistantMsg = makeAssistantMessage(
@@ -198,21 +210,25 @@ export function VoiceCommandBar() {
               execResult.message,
             );
             cur = addMessage(cur, toolMsg);
-          } else {
-            const toolMsg = makeToolMessage(
-              data.tool,
-              data.arguments as Record<string, unknown>,
-              execResult.success,
-              execResult.message,
-            );
-            cur = addMessage(cur, toolMsg);
-
-            if (execResult.success) {
-              window.dispatchEvent(
-                new CustomEvent("vocaflow:events-changed"),
-              );
-            }
+            // Pause ReAct loop — wait for user confirmation
+            return cur;
           }
+
+          const toolMsg = makeToolMessage(
+            data.tool,
+            data.arguments as Record<string, unknown>,
+            execResult.success,
+            execResult.message,
+          );
+          cur = addMessage(cur, toolMsg);
+
+          if (execResult.success) {
+            window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
+          }
+
+          // Continue ReAct loop
+          const continueData = await callOrchestrator("请继续", cur.messages);
+          return handleOrchestratorResult(continueData, cur, userText, iteration + 1);
         } catch {
           const toolMsg = makeToolMessage(
             data.tool,
@@ -220,11 +236,8 @@ export function VoiceCommandBar() {
             false,
             "工具执行失败",
           );
-          cur = addMessage(cur, toolMsg);
+          return addMessage(cur, toolMsg);
         }
-
-        setSession(cur);
-        break;
       }
     }
   }
@@ -234,15 +247,16 @@ export function VoiceCommandBar() {
 
     setIsExecutingPending(true);
     const actionId = pendingAction.id;
-    const toolLabelText = toolLabel(pendingAction.type);
+    const actionType = pendingAction.type;
+    const actionPayload = pendingAction.payload;
 
     try {
       const execResult = await executorRef.current!.executePendingAction(actionId);
 
       if (execResult.kind === "execution") {
         const toolMsg = makeToolMessage(
-          pendingAction.type,
-          pendingAction.payload as Record<string, unknown>,
+          actionType,
+          actionPayload as Record<string, unknown>,
           execResult.success,
           execResult.message,
         );
@@ -251,18 +265,36 @@ export function VoiceCommandBar() {
           window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
         }
 
-        setSession((s) => (s ? addMessage(s, toolMsg) : s));
+        setPendingAction(null);
+
+        // Resume ReAct loop after pending action resolves
+        setSession((s) => {
+          if (!s) return s;
+          const updated = addMessage(s, toolMsg);
+          sessionRef.current = updated;
+
+          callOrchestrator("请继续", updated.messages)
+            .then((continueData) =>
+              handleOrchestratorResult(continueData, updated, actionType),
+            )
+            .then((finalSession) => setSession(finalSession))
+            .catch(() => {});
+
+          return updated;
+        });
+      } else {
+        setPendingAction(null);
       }
     } catch {
       const toolMsg = makeToolMessage(
-        pendingAction.type,
-        pendingAction.payload as Record<string, unknown>,
+        actionType,
+        actionPayload as Record<string, unknown>,
         false,
         "确认执行失败",
       );
       setSession((s) => (s ? addMessage(s, toolMsg) : s));
-    } finally {
       setPendingAction(null);
+    } finally {
       setIsExecutingPending(false);
     }
   }
@@ -270,16 +302,31 @@ export function VoiceCommandBar() {
   function handleCancelPending() {
     if (!pendingAction || isExecutingPending) return;
 
+    const actionType = pendingAction.type;
+    const actionPayload = pendingAction.payload;
     executorRef.current!.cancelPendingAction(pendingAction.id);
 
     const toolMsg = makeToolMessage(
-      pendingAction.type,
-      pendingAction.payload as Record<string, unknown>,
+      actionType,
+      actionPayload as Record<string, unknown>,
       false,
       "操作已取消",
     );
-    setSession((s) => (s ? addMessage(s, toolMsg) : s));
     setPendingAction(null);
+    setSession((s) => {
+      if (!s) return s;
+      const updated = addMessage(s, toolMsg);
+      sessionRef.current = updated;
+
+      callOrchestrator("请继续", updated.messages)
+        .then((continueData) =>
+          handleOrchestratorResult(continueData, updated, actionType),
+        )
+        .then((finalSession) => setSession(finalSession))
+        .catch(() => {});
+
+      return updated;
+    });
   }
 
   const messages = session?.messages ?? [];
@@ -482,9 +529,11 @@ function MessageBubble({ message }: { message: SessionMessage }) {
                 ? "bg-[#e8e2d0]/60 text-[#1c1b1b]"
                 : message.resultKind === "clarification"
                   ? "bg-[#f6f3f2] text-[#1c1b1b] border border-[#e4e3da]/80"
-                  : message.resultKind === "unknown"
-                    ? "bg-[#ffdad6]/40 text-[#ba1a1a]"
-                    : "bg-[#f6f3f2] text-[#1c1b1b]"
+                  : message.resultKind === "finish"
+                    ? "bg-[#e8f5e9]/80 text-[#1c1b1b]"
+                    : message.resultKind === "unknown"
+                      ? "bg-[#ffdad6]/40 text-[#ba1a1a]"
+                      : "bg-[#f6f3f2] text-[#1c1b1b]"
             }`}
           >
             <div className="mb-1 flex items-center gap-1.5">
@@ -542,13 +591,15 @@ function MessageBubble({ message }: { message: SessionMessage }) {
 // -- helpers --
 
 function assistantIcon(
-  kind: "clarification" | "chat" | "unknown" | "tool_call",
+  kind: "clarification" | "chat" | "unknown" | "tool_call" | "finish",
 ) {
   switch (kind) {
     case "clarification":
       return <HelpCircle className="h-3 w-3 text-[#625f50]" />;
     case "chat":
       return <MessageCircle className="h-3 w-3 text-[#625f50]" />;
+    case "finish":
+      return <CheckCircle2 className="h-3 w-3 text-green-600" />;
     case "unknown":
       return <AlertTriangle className="h-3 w-3 text-[#ba1a1a]" />;
     case "tool_call":
@@ -557,13 +608,15 @@ function assistantIcon(
 }
 
 function assistantLabel(
-  kind: "clarification" | "chat" | "unknown" | "tool_call",
+  kind: "clarification" | "chat" | "unknown" | "tool_call" | "finish",
 ) {
   switch (kind) {
     case "clarification":
       return "需要补充";
     case "chat":
       return "对话";
+    case "finish":
+      return "完成";
     case "unknown":
       return "无法理解";
     case "tool_call":
@@ -577,8 +630,6 @@ function toolLabel(tool: string): string {
       return "创建日程";
     case "query_events":
       return "查询日程";
-    case "find_events_for_delete":
-      return "查找待删除日程";
     case "delete_event":
       return "删除日程";
     default:

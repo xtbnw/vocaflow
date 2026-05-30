@@ -145,15 +145,12 @@ export class ToolExecutor {
           .join("\n")}`;
       }
 
-      case "find_events_for_delete": {
-        const events = obj.events as CalendarEvent[] | undefined;
-        if (!events || events.length === 0) return "未找到相关日程";
-        if (events.length === 1) {
-          return `找到 1 个候选日程：\n${formatEvent(events[0])}`;
-        }
-        return `找到 ${events.length} 个候选日程：\n${events
-          .map((e) => `  · ${formatEvent(e)}`)
-          .join("\n")}`;
+      case "delete_event": {
+        const deleted = (obj.deleted as number) ?? 0;
+        const failed = (obj.failed as number) ?? 0;
+        let msg = `已删除 ${deleted} 个日程`;
+        if (failed > 0) msg += `，${failed} 个删除失败`;
+        return msg;
       }
 
       default:
@@ -175,5 +172,5 @@ function formatEvent(e: CalendarEvent): string {
   const start = formatLocalTime(e.startAt);
   const end = formatLocalTime(e.endAt);
   const location = e.location ? ` @${e.location}` : "";
-  return `${e.title}  ${start} - ${end}${location}`;
+  return `[${e.id}] ${e.title}  ${start} - ${end}${location}`;
 }

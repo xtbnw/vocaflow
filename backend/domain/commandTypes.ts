@@ -2,7 +2,8 @@ export type ParseResult =
   | ToolCallResult
   | ClarificationResult
   | ChatResult
-  | UnknownResult;
+  | UnknownResult
+  | FinishResult;
 
 export interface ToolCallResult {
   kind: "tool_call";
@@ -25,4 +26,9 @@ export interface ChatResult {
 export interface UnknownResult {
   kind: "unknown";
   reason?: string;
+}
+
+export interface FinishResult {
+  kind: "finish";
+  message: string;
 }
