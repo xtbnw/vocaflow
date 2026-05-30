@@ -62,7 +62,7 @@ export function VoiceCommandBar() {
     const repo = new LocalStorageCalendarRepository();
     const registry = createDefaultToolRegistry(repo);
     executorRef.current = new ToolExecutor(registry, repo);
-    executorRef.current.registerBeforeExecuteHook(new WriteActionPreviewHook());
+    executorRef.current.registerBeforeExecuteHook(new WriteActionPreviewHook(repo));
   }
 
   const asrRef = useRef<ReturnType<typeof getASRProvider>>(null);

@@ -3,6 +3,8 @@ import type {
   ToolExecutionContext,
   ToolExecutionDecision,
 } from "../domain/beforeToolExecuteHook";
+import type { CalendarRepository } from "../domain/calendarRepository";
+import type { CalendarEvent } from "../domain/calendarTypes";
 import type { PendingAction, ActionPreview } from "../domain/pendingAction";
 
 const WRITE_TOOLS = new Set(["create_event", "delete_event"]);
@@ -23,9 +25,22 @@ function formatLocalTime(iso: string): string {
   return `${month}月${day}日 ${hour}:${min}`;
 }
 
-function buildCreateEventPreview(
+function formatTimeRange(event: CalendarEvent): string {
+  const start = new Date(event.startAt);
+  const end = new Date(event.endAt);
+  const startTime = `${String(start.getHours()).padStart(2, "0")}:${String(start.getMinutes()).padStart(2, "0")}`;
+  const endTime = `${String(end.getHours()).padStart(2, "0")}:${String(end.getMinutes()).padStart(2, "0")}`;
+  return `${startTime}-${endTime}`;
+}
+
+function defaultEndAt(startAt: string): string {
+  return new Date(new Date(startAt).getTime() + 3_600_000).toISOString();
+}
+
+async function buildCreateEventPreview(
   args: Record<string, unknown>,
-): ActionPreview {
+  repository: CalendarRepository,
+): Promise<ActionPreview> {
   const items: ActionPreview["items"] = [
     { label: "标题", value: String(args.title ?? "") },
     {
@@ -46,6 +61,25 @@ function buildCreateEventPreview(
   }
   if (!args.title || String(args.title).trim().length === 0) {
     warnings.push("日程标题为空");
+  }
+
+  const startAt = String(args.startAt ?? "");
+  if (startAt) {
+    const endAt = args.endAt ? String(args.endAt) : defaultEndAt(startAt);
+    const startTime = new Date(startAt).getTime();
+    const endTime = new Date(endAt).getTime();
+    const existingEvents = await repository.list();
+    const conflicts = existingEvents.filter(
+      (event) =>
+        new Date(event.startAt).getTime() < endTime &&
+        new Date(event.endAt).getTime() > startTime,
+    );
+    warnings.push(
+      ...conflicts.map(
+        (event) =>
+          `时间冲突：${formatTimeRange(event)} 已有“${event.title}”`,
+      ),
+    );
   }
 
   return {
@@ -71,6 +105,8 @@ function buildDeleteEventPreview(
 export class WriteActionPreviewHook implements BeforeToolExecuteHook {
   name = "WriteActionPreviewHook";
 
+  constructor(private readonly repository: CalendarRepository) {}
+
   async run(context: ToolExecutionContext): Promise<ToolExecutionDecision> {
     if (context.source === "pending_action_confirmed") {
       return { kind: "continue" };
@@ -88,7 +124,11 @@ export class WriteActionPreviewHook implements BeforeToolExecuteHook {
     switch (context.toolName) {
       case "create_event": {
         actionType = "create_event";
-        preview = buildCreateEventPreview(args);
+        try {
+          preview = await buildCreateEventPreview(args, this.repository);
+        } catch {
+          return { kind: "reject", message: "无法读取已有日程，请稍后重试" };
+        }
         break;
       }
       case "delete_event": {
