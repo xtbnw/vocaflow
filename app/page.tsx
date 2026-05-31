@@ -2,8 +2,9 @@
 
 import { buildMonthGrid } from "@/frontend/components/calendar/buildMonthGrid";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persistence/localStorageCalendarRepository";
 import type { CalendarEvent } from "@/backend/domain/calendarTypes";
+import { isOnLocalDate } from "@/backend/shared/timeUtils";
+import { useCalendarEvents } from "@/frontend/hooks/useCalendarEvents";
 
 type ViewName = "year" | "month" | "day";
 
@@ -26,22 +27,7 @@ export default function Home() {
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [displayYear, setDisplayYear] = useState(initialYear);
   const [displayMonthIndex, setDisplayMonthIndex] = useState(initialMonthIndex);
-  const [events, setEvents] = useState<CalendarEvent[]>([]);
-
-  const repoRef = useRef<LocalStorageCalendarRepository | null>(null);
-  if (!repoRef.current) {
-    repoRef.current = new LocalStorageCalendarRepository();
-  }
-
-  const loadEvents = () => {
-    repoRef.current!.list().then(setEvents);
-  };
-
-  useEffect(() => {
-    loadEvents();
-    window.addEventListener("vocaflow:events-changed", loadEvents);
-    return () => window.removeEventListener("vocaflow:events-changed", loadEvents);
-  }, []);
+  const events = useCalendarEvents();
 
   const summariesByDay = useMemo(() => {
     const map: Record<number, string[]> = {};
@@ -61,7 +47,7 @@ export default function Home() {
   const dayEvents = useMemo(() => {
     if (!selectedDayKey) return [];
     return events
-      .filter((e) => e.startAt.startsWith(selectedDayKey))
+      .filter((e) => isOnLocalDate(e.startAt, selectedDayKey))
       .sort((a, b) => a.startAt.localeCompare(b.startAt));
   }, [events, selectedDayKey]);
 

@@ -1,3 +1,4 @@
 # Persistence Infrastructure
 
-Repository implementations for localStorage, IndexedDB, or future database adapters.
+Server-side SQLite repository implementation. Runtime data is stored outside
+source control under `data/`.

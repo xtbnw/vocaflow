@@ -4,338 +4,88 @@ import {
   Send,
   Mic,
   MicOff,
-  CheckCircle2,
-  XCircle,
   Wrench,
-  MessageCircle,
-  HelpCircle,
-  AlertTriangle,
   ChevronUp,
   ChevronDown,
   Trash2,
   Clock,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
+  ChevronRight,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { Session, SessionMessage } from "@/backend/domain/sessionTypes";
-import type { OrchestratorResult } from "@/backend/app/commandOrchestrator";
-import type { ToolExecutionResult } from "@/backend/domain/toolExecutionResult";
-import type { PendingAction } from "@/backend/domain/pendingAction";
-import {
-  createSession,
-  addMessage,
-  makeUserMessage,
-  makeAssistantMessage,
-  makeToolMessage,
-} from "@/backend/app/sessionManager";
-import { ToolExecutor } from "@/backend/app/toolExecutor";
-import { createDefaultToolRegistry } from "@/backend/domain/toolRegistry";
-import { LocalStorageCalendarRepository } from "@/backend/infrastructure/persistence/localStorageCalendarRepository";
-import { getASRProvider } from "@/backend/infrastructure/asr/asrProviderFactory";
-import { WriteActionPreviewHook } from "@/backend/app/writeActionPreviewHook";
+import { useEffect, useRef, useState } from "react";
+import type { SessionMessage } from "@/backend/domain/sessionTypes";
+import { useAgentSession, isCalendarTool, shouldStopVoice, type ToolActivity } from "@/frontend/hooks/useAgentSession";
+import { useVoiceInput } from "@/frontend/hooks/useVoiceInput";
+import { useCalendarEventsRefresh } from "@/frontend/hooks/useCalendarEvents";
 import { ActionPreviewPanel } from "./ActionPreviewPanel";
 
 export function VoiceCommandBar() {
-  const [session, setSession] = useState<Session | null>(null);
-  const [inputText, setInputText] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [collapsed, setCollapsed] = useState(true);
-  const [isListening, setIsListening] = useState(false);
-  const [voiceSupported, setVoiceSupported] = useState(false);
-  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
-  const [isExecutingPending, setIsExecutingPending] = useState(false);
+  const triggerRefresh = useCalendarEventsRefresh();
 
-  const MAX_REACT_ITERATIONS = 20;
-  const sessionRef = useRef<Session | null>(null);
-  useEffect(() => {
-    sessionRef.current = session;
-  }, [session]);
+  const {
+    threadId: _threadId,
+    messages,
+    toolActivities,
+    pendingAction,
+    isSubmitting,
+    isExecutingPending,
+    error,
+    submitText,
+    confirmPending,
+    cancelPending,
+    clearSession,
+  } = useAgentSession(triggerRefresh);
 
-  useEffect(() => {
-    const asr = getASRProvider();
-    setVoiceSupported(asr.isSupported());
-  }, []);
+  const {
+    inputText,
+    setInputText,
+    isListening,
+    voiceSupported,
+    toggleListening,
+    stopListening,
+  } = useVoiceInput();
 
   const messageListRef = useRef<HTMLDivElement>(null);
 
-  const executorRef = useRef<ToolExecutor | null>(null);
-  if (!executorRef.current) {
-    const repo = new LocalStorageCalendarRepository();
-    const registry = createDefaultToolRegistry(repo);
-    executorRef.current = new ToolExecutor(registry, repo);
-    executorRef.current.registerBeforeExecuteHook(new WriteActionPreviewHook(repo));
-  }
-
-  const asrRef = useRef<ReturnType<typeof getASRProvider>>(null);
-  if (!asrRef.current) {
-    asrRef.current = getASRProvider();
-  }
-
-  // auto-scroll on new messages
   useEffect(() => {
     const el = messageListRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [session?.messages]);
+  }, [messages, toolActivities]);
 
-  const clearSession = useCallback(() => {
-    setSession(null);
-    setCollapsed(true);
-    setPendingAction(null);
-  }, []);
-
-  // wire ASR callbacks
-  const committedRef = useRef("");
-  useEffect(() => {
-    const asr = asrRef.current;
-    if (!asr) return;
-
-    asr.onPartialResult = (text) => {
-      const prefix = committedRef.current;
-      setInputText(prefix ? `${prefix} ${text}` : text);
-    };
-
-    asr.onFinalResult = (text) => {
-      committedRef.current = committedRef.current
-        ? `${committedRef.current} ${text}`
-        : text;
-      setInputText(committedRef.current);
-    };
-
-    asr.onError = (message) => {
-      console.error("ASR error:", message);
-      setIsListening(false);
-    };
-
-    return () => {
-      asr.onPartialResult = null;
-      asr.onFinalResult = null;
-      asr.onError = null;
-    };
-  }, []);
-
-  async function callOrchestrator(
-    text: string,
-    history: readonly SessionMessage[],
-  ): Promise<OrchestratorResult> {
-    const res = await fetch("/api/command", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, messages: history }),
-    });
-    return (await res.json()) as OrchestratorResult;
-  }
-
-  const submitText = async (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = inputText.trim();
-    if (!text || isSubmitting) return;
+    if (!text || isSubmitting || pendingAction || isExecutingPending) return;
 
-    setIsSubmitting(true);
     setInputText("");
     setCollapsed(false);
-
-    const userMsg = makeUserMessage(text);
-    let cur = session ?? createSession();
-    const history = cur.messages;
-    cur = addMessage(cur, userMsg);
-    setSession(cur);
-    sessionRef.current = cur;
-
-    try {
-      const data = await callOrchestrator(text, cur.messages);
-      const finalSession = await handleOrchestratorResult(data, cur, text);
-      setSession(finalSession);
-    } catch {
-      const errMsg = makeAssistantMessage("请求失败，请稍后重试", "unknown");
-      setSession((s) => (s ? addMessage(s, errMsg) : s));
-    } finally {
-      setIsSubmitting(false);
-    }
+    await submitText(text);
   };
 
-  async function handleOrchestratorResult(
-    data: OrchestratorResult,
-    currentSession: Session,
-    userText: string,
-    iteration = 0,
-  ): Promise<Session> {
-    if (iteration >= MAX_REACT_ITERATIONS) return currentSession;
+  const hasBlocker = !!pendingAction || isExecutingPending;
 
-    switch (data.kind) {
-      case "finish":
-      case "chat": {
-        const msg = makeAssistantMessage(data.message, data.kind === "finish" ? "finish" : "chat");
-        return addMessage(currentSession, msg);
-      }
-      case "clarification": {
-        const msg = makeAssistantMessage(
-          data.clarificationQuestion,
-          "clarification",
-        );
-        return addMessage(currentSession, msg);
-      }
-      case "unknown": {
-        const msg = makeAssistantMessage(
-          data.reason ?? "未能理解您的意图",
-          "unknown",
-        );
-        return addMessage(currentSession, msg);
-      }
-      case "error": {
-        const msg = makeAssistantMessage(data.message, "unknown");
-        return addMessage(currentSession, msg);
-      }
-      case "tool_call": {
-        const assistantMsg = makeAssistantMessage(
-          `正在执行${toolLabel(data.tool)}…`,
-          "tool_call",
-          data.tool,
-          data.arguments as Record<string, unknown>,
-        );
-        let cur = addMessage(currentSession, assistantMsg);
-
-        try {
-          const execResult: ToolExecutionResult = await executorRef.current!.execute(
-            data.tool,
-            data.arguments,
-          );
-
-          if (execResult.kind === "pending_action") {
-            executorRef.current!.storePendingAction(execResult.pendingAction);
-            setPendingAction(execResult.pendingAction);
-
-            const toolMsg = makeToolMessage(
-              data.tool,
-              data.arguments as Record<string, unknown>,
-              true,
-              execResult.message,
-            );
-            cur = addMessage(cur, toolMsg);
-            // Pause ReAct loop — wait for user confirmation
-            return cur;
-          }
-
-          const toolMsg = makeToolMessage(
-            data.tool,
-            data.arguments as Record<string, unknown>,
-            execResult.success,
-            execResult.message,
-          );
-          cur = addMessage(cur, toolMsg);
-
-          if (execResult.success) {
-            window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
-          }
-
-          // Continue ReAct loop
-          const continueData = await callOrchestrator("请继续", cur.messages);
-          return handleOrchestratorResult(continueData, cur, userText, iteration + 1);
-        } catch {
-          const toolMsg = makeToolMessage(
-            data.tool,
-            data.arguments as Record<string, unknown>,
-            false,
-            "工具执行失败",
-          );
-          return addMessage(cur, toolMsg);
-        }
-      }
+  useEffect(() => {
+    if (shouldStopVoice(hasBlocker, isListening)) {
+      stopListening();
     }
-  }
+  }, [hasBlocker, isListening, stopListening]);
 
-  async function handleConfirmPending() {
-    if (!pendingAction || isExecutingPending) return;
+  const handleClearSession = () => {
+    clearSession();
+    setCollapsed(true);
+  };
 
-    setIsExecutingPending(true);
-    const actionId = pendingAction.id;
-    const actionType = pendingAction.type;
-    const actionPayload = pendingAction.payload;
-
-    try {
-      const execResult = await executorRef.current!.executePendingAction(actionId);
-
-      if (execResult.kind === "execution") {
-        const toolMsg = makeToolMessage(
-          actionType,
-          actionPayload as Record<string, unknown>,
-          execResult.success,
-          execResult.message,
-        );
-
-        if (execResult.success) {
-          window.dispatchEvent(new CustomEvent("vocaflow:events-changed"));
-        }
-
-        setPendingAction(null);
-
-        // Resume ReAct loop after pending action resolves
-        setSession((s) => {
-          if (!s) return s;
-          const updated = addMessage(s, toolMsg);
-          sessionRef.current = updated;
-
-          callOrchestrator("请继续", updated.messages)
-            .then((continueData) =>
-              handleOrchestratorResult(continueData, updated, actionType),
-            )
-            .then((finalSession) => setSession(finalSession))
-            .catch(() => {});
-
-          return updated;
-        });
-      } else {
-        setPendingAction(null);
-      }
-    } catch {
-      const toolMsg = makeToolMessage(
-        actionType,
-        actionPayload as Record<string, unknown>,
-        false,
-        "确认执行失败",
-      );
-      setSession((s) => (s ? addMessage(s, toolMsg) : s));
-      setPendingAction(null);
-    } finally {
-      setIsExecutingPending(false);
-    }
-  }
-
-  function handleCancelPending() {
-    if (!pendingAction || isExecutingPending) return;
-
-    const actionType = pendingAction.type;
-    const actionPayload = pendingAction.payload;
-    executorRef.current!.cancelPendingAction(pendingAction.id);
-
-    const toolMsg = makeToolMessage(
-      actionType,
-      actionPayload as Record<string, unknown>,
-      false,
-      "操作已取消",
-    );
-    setPendingAction(null);
-    setSession((s) => {
-      if (!s) return s;
-      const updated = addMessage(s, toolMsg);
-      sessionRef.current = updated;
-
-      callOrchestrator("请继续", updated.messages)
-        .then((continueData) =>
-          handleOrchestratorResult(continueData, updated, actionType),
-        )
-        .then((finalSession) => setSession(finalSession))
-        .catch(() => {});
-
-      return updated;
-    });
-  }
-
-  const messages = session?.messages ?? [];
   const hasMessages = messages.length > 0;
+  const hasToolActivities = toolActivities.length > 0;
   const latestMessage = hasMessages ? messages[messages.length - 1] : null;
+  const hasActiveTools = toolActivities.some((a) => a.status === "running");
 
   return (
     <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-50 flex flex-col items-center gap-2 px-4 pb-4">
-      {/* expanded: all messages + optional preview panel */}
       {hasMessages && !collapsed && (
         <div
           className={`pointer-events-auto mb-2 flex w-full flex-col ${
@@ -351,6 +101,19 @@ export function VoiceCommandBar() {
                 {messages.map((msg) => (
                   <MessageBubble key={msg.id} message={msg} />
                 ))}
+
+                {hasToolActivities && (
+                  <div className="mt-2 border-t border-[#625f50]/10 pt-2">
+                    <ToolActivityList activities={toolActivities} />
+                  </div>
+                )}
+
+                {error && (
+                  <div className="mt-2 flex items-center gap-2 rounded-xl bg-[#ffdad6]/60 px-4 py-2.5 text-sm text-[#ba1a1a]">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span>{error}</span>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -358,15 +121,14 @@ export function VoiceCommandBar() {
               <div className="w-[320px] shrink-0">
                 <ActionPreviewPanel
                   pendingAction={pendingAction}
-                  onConfirm={handleConfirmPending}
-                  onCancel={handleCancelPending}
+                  onConfirm={confirmPending}
+                  onCancel={cancelPending}
                   disabled={isExecutingPending}
                 />
               </div>
             )}
           </div>
 
-          {/* action bar */}
           <div className="mt-2 flex items-center justify-between rounded-xl bg-[#f6f3f2]/90 px-4 py-2 text-xs text-[#49473f] backdrop-blur-sm">
             <button
               className="flex items-center gap-1 rounded-full px-3 py-1 transition-colors hover:bg-[#e5e2e1]/50"
@@ -377,7 +139,7 @@ export function VoiceCommandBar() {
             </button>
             <button
               className="flex items-center gap-1 rounded-full px-3 py-1 text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/50"
-              onClick={clearSession}
+              onClick={handleClearSession}
             >
               <Trash2 className="h-3.5 w-3.5" />
               清除
@@ -386,11 +148,16 @@ export function VoiceCommandBar() {
         </div>
       )}
 
-      {/* collapsed: latest message + pending indicator */}
       {hasMessages && collapsed && (
         <div className="pointer-events-auto mb-2 flex w-full max-w-[760px] flex-col">
           <div className="vf-glass rounded-2xl border border-white/30 p-3 shadow-sm">
             <MessageBubble message={latestMessage!} />
+            {hasActiveTools && (
+              <div className="mt-2 flex items-center gap-2 rounded-lg bg-[#e8e2d0]/40 px-3 py-1.5 text-xs text-[#625f50]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                <span>正在处理...</span>
+              </div>
+            )}
           </div>
 
           {pendingAction && (
@@ -408,7 +175,6 @@ export function VoiceCommandBar() {
             </div>
           )}
 
-          {/* action bar */}
           <div className="mt-2 flex items-center justify-between rounded-xl bg-[#f6f3f2]/90 px-4 py-2 text-xs text-[#49473f] backdrop-blur-sm">
             <button
               className="flex items-center gap-1 rounded-full px-3 py-1 transition-colors hover:bg-[#e5e2e1]/50"
@@ -419,7 +185,7 @@ export function VoiceCommandBar() {
             </button>
             <button
               className="flex items-center gap-1 rounded-full px-3 py-1 text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/50"
-              onClick={clearSession}
+              onClick={handleClearSession}
             >
               <Trash2 className="h-3.5 w-3.5" />
               清除
@@ -428,39 +194,27 @@ export function VoiceCommandBar() {
         </div>
       )}
 
-      {/* input bar */}
       <div className="pointer-events-auto flex w-full max-w-[760px] items-center justify-center gap-3">
-        {/* voice mic button */}
         <button
           className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full border shadow-sm transition-all duration-200 ${
-            voiceSupported
-              ? isListening
-                ? "border-red-300 bg-red-100 text-red-500 animate-pulse"
-                : "vf-glass border-white/50 text-[#625f50] hover:scale-105 hover:bg-[#fff9e6]"
-              : "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
+            hasBlocker
+              ? "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
+              : voiceSupported
+                ? isListening
+                  ? "border-red-300 bg-red-100 text-red-500 animate-pulse"
+                  : "vf-glass border-white/50 text-[#625f50] hover:scale-105 hover:bg-[#fff9e6]"
+                : "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
           }`}
-          disabled={!voiceSupported}
-          onClick={() => {
-            if (!voiceSupported) return;
-            const asr = asrRef.current;
-            if (!asr) return;
-
-            if (isListening) {
-              asr.stop();
-              setIsListening(false);
-            } else {
-              committedRef.current = "";
-              setInputText("");
-              asr.start();
-              setIsListening(true);
-            }
-          }}
+          disabled={!voiceSupported || hasBlocker}
+          onClick={hasBlocker ? undefined : toggleListening}
           title={
-            voiceSupported
-              ? isListening
-                ? "停止录音"
-                : "语音输入"
-              : "浏览器不支持语音识别"
+            hasBlocker
+              ? "请先确认当前操作"
+              : voiceSupported
+                ? isListening
+                  ? "停止录音"
+                  : "语音输入"
+                : "浏览器不支持语音识别"
           }
         >
           {voiceSupported ? (
@@ -470,33 +224,21 @@ export function VoiceCommandBar() {
           )}
         </button>
 
-        {/* text input */}
         <form
           className="vf-glass flex h-12 min-w-0 flex-1 items-center rounded-full border border-white/30 px-5 shadow-sm transition-colors focus-within:border-[#625f50]/50"
-          onSubmit={submitText}
+          onSubmit={handleSubmit}
         >
           <input
             className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
             onChange={(e) => setInputText(e.target.value)}
-            placeholder={
-              isSubmitting
-                ? "处理中..."
-                : session?.status === "active" &&
-                    session.messages.some(
-                      (m) =>
-                        m.kind === "assistant" &&
-                        m.resultKind === "clarification",
-                    )
-                  ? "补充信息..."
-                  : "输入指令..."
-            }
+            placeholder={isSubmitting ? "处理中..." : hasBlocker ? "请先确认当前操作" : "输入指令..."}
             type="text"
             value={inputText}
-            disabled={isSubmitting}
+            disabled={isSubmitting || hasBlocker}
           />
           <button
             className="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#fff9e6] text-[#625f50] transition-colors hover:bg-[#e8e2d0] disabled:cursor-not-allowed disabled:opacity-40"
-            disabled={!inputText.trim() || isSubmitting}
+            disabled={!inputText.trim() || isSubmitting || hasBlocker}
             type="submit"
           >
             <Send className="h-3.5 w-3.5" />
@@ -507,7 +249,114 @@ export function VoiceCommandBar() {
   );
 }
 
-// -- Message bubble renderers --
+// ---------------------------------------------------------------------------
+// ToolActivityList — 工具调用状态列表
+// ---------------------------------------------------------------------------
+
+function ToolActivityList({ activities }: { activities: ToolActivity[] }) {
+  const [expandedInternal, setExpandedInternal] = useState(false);
+
+  const calendar = activities.filter((a) => isCalendarTool(a.tool));
+  const internal = activities.filter((a) => !isCalendarTool(a.tool));
+
+  const internalRunning = internal.filter((a) => a.status === "running").length;
+  const internalCompleted = internal.filter((a) => a.status === "completed").length;
+  const internalFailed = internal.filter((a) => a.status === "failed").length;
+
+  const statParts: string[] = [];
+  if (internalRunning > 0) statParts.push(`${internalRunning} 个运行中`);
+  if (internalCompleted > 0) statParts.push(`${internalCompleted} 个已完成`);
+  if (internalFailed > 0) statParts.push(`${internalFailed} 个失败`);
+
+  return (
+    <div className="space-y-1.5">
+      {calendar.map((a) => (
+        <CalendarToolCard key={a.callId} activity={a} />
+      ))}
+
+      {internal.length > 0 && (
+        <div className="rounded-lg bg-[#e8e2d0]/40 px-3 py-1.5">
+          <button
+            className="flex w-full items-center gap-1.5 text-xs text-[#625f50]"
+            onClick={() => setExpandedInternal(!expandedInternal)}
+          >
+            <ChevronRight
+              className={`h-3 w-3 transition-transform ${expandedInternal ? "rotate-90" : ""}`}
+            />
+            <Wrench className="h-3 w-3" />
+            <span>
+              {internalRunning > 0 && (
+                <span className="mr-1 inline-flex items-center gap-1">
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                </span>
+              )}
+              {statParts.join("，")}
+            </span>
+          </button>
+
+          {expandedInternal && (
+            <div className="mt-1.5 space-y-1">
+              {internal.map((a) => (
+                <div key={a.callId} className="flex items-center gap-1.5 pl-4 text-[11px] text-[#49473f]/70">
+                  <StatusIcon status={a.status} />
+                  <span className="font-medium">{a.tool}</span>
+                  {a.status === "running" && (
+                    <Loader2 className="h-2.5 w-2.5 animate-spin text-[#625f50]" />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CalendarToolCard — 日历工具详细卡片
+// ---------------------------------------------------------------------------
+
+function CalendarToolCard({ activity }: { activity: ToolActivity }) {
+  return (
+    <div className="flex items-start gap-2 rounded-lg bg-white/50 px-3 py-2">
+      <StatusIcon status={activity.status} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-medium text-[#1c1b1b]">
+            {toolLabel(activity.tool)}
+          </span>
+          {activity.status === "running" && (
+            <Loader2 className="h-3 w-3 animate-spin text-[#625f50]" />
+          )}
+        </div>
+        {activity.arguments != null && (
+          <div className="mt-0.5 text-[11px] text-[#49473f]/60 truncate">
+            {formatArgsSummary(activity.arguments as Record<string, unknown>)}
+          </div>
+        )}
+        {activity.status === "failed" && activity.message && (
+          <div className="mt-0.5 text-[11px] text-[#ba1a1a]">{activity.message}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StatusIcon({ status }: { status: ToolActivity["status"] }) {
+  switch (status) {
+    case "running":
+      return <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#625f50]" />;
+    case "completed":
+      return <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[#2e7d32]" />;
+    case "failed":
+      return <XCircle className="h-3.5 w-3.5 shrink-0 text-[#ba1a1a]" />;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MessageBubble
+// ---------------------------------------------------------------------------
 
 function MessageBubble({ message }: { message: SessionMessage }) {
   switch (message.kind) {
@@ -525,104 +374,38 @@ function MessageBubble({ message }: { message: SessionMessage }) {
         <div className="mb-2 flex justify-start">
           <div
             className={`max-w-[85%] rounded-2xl rounded-bl-md px-4 py-2.5 text-sm shadow-sm ${
-              message.resultKind === "tool_call"
+              message.toolCall
                 ? "bg-[#e8e2d0]/60 text-[#1c1b1b]"
-                : message.resultKind === "clarification"
-                  ? "bg-[#f6f3f2] text-[#1c1b1b] border border-[#e4e3da]/80"
-                  : message.resultKind === "finish"
-                    ? "bg-[#e8f5e9]/80 text-[#1c1b1b]"
-                    : message.resultKind === "unknown"
-                      ? "bg-[#ffdad6]/40 text-[#ba1a1a]"
-                      : "bg-[#f6f3f2] text-[#1c1b1b]"
+                : "bg-[#f6f3f2] text-[#1c1b1b]"
             }`}
           >
-            <div className="mb-1 flex items-center gap-1.5">
-              {assistantIcon(message.resultKind)}
-              <span className="text-[10px] font-medium uppercase tracking-widest text-[#49473f]/60">
-                {assistantLabel(message.resultKind)}
-              </span>
-            </div>
+            {message.toolCall && (
+              <div className="mb-1 flex items-center gap-1.5">
+                <Wrench className="h-3 w-3 text-[#625f50]" />
+                <span className="text-[10px] font-medium uppercase tracking-widest text-[#49473f]/60">
+                  工具调用
+                </span>
+              </div>
+            )}
             <p>{message.content}</p>
-            {message.resultKind === "tool_call" && message.tool && (
+            {message.toolCall && (
               <div className="mt-2 rounded-lg bg-white/50 px-3 py-1.5 text-[11px] text-[#625f50]">
-                <span className="font-medium">{toolLabel(message.tool)}</span>
-                {message.arguments && (
-                  <span className="ml-2 text-[#49473f]/60">
-                    {formatArgsSummary(message.arguments)}
-                  </span>
-                )}
+                <span className="font-medium">{toolLabel(message.toolCall.tool)}</span>
+                <span className="ml-2 text-[#49473f]/60">
+                  {formatArgsSummary(message.toolCall.arguments)}
+                </span>
               </div>
             )}
           </div>
         </div>
       );
 
-    case "tool":
-      return (
-        <div className="mb-2 flex justify-start">
-          <div
-            className={`max-w-[85%] rounded-2xl rounded-bl-md px-4 py-2.5 text-sm shadow-sm ${
-              message.success
-                ? "bg-[#e8f5e9]/80 text-[#1c1b1b]"
-                : "bg-[#ffdad6]/60 text-[#ba1a1a]"
-            }`}
-          >
-            <div className="mb-1 flex items-center gap-1.5">
-              {message.success ? (
-                <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
-              ) : (
-                <XCircle className="h-3.5 w-3.5 text-red-500" />
-              )}
-              <span className="text-[10px] font-medium uppercase tracking-widest text-[#49473f]/60">
-                {message.success ? "执行成功" : "执行失败"}
-              </span>
-            </div>
-            <p className="whitespace-pre-line">{message.message}</p>
-            <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[#49473f]/50">
-              <Wrench className="h-3 w-3" />
-              <span>{toolLabel(message.toolName)}</span>
-            </div>
-          </div>
-        </div>
-      );
   }
 }
 
-// -- helpers --
-
-function assistantIcon(
-  kind: "clarification" | "chat" | "unknown" | "tool_call" | "finish",
-) {
-  switch (kind) {
-    case "clarification":
-      return <HelpCircle className="h-3 w-3 text-[#625f50]" />;
-    case "chat":
-      return <MessageCircle className="h-3 w-3 text-[#625f50]" />;
-    case "finish":
-      return <CheckCircle2 className="h-3 w-3 text-green-600" />;
-    case "unknown":
-      return <AlertTriangle className="h-3 w-3 text-[#ba1a1a]" />;
-    case "tool_call":
-      return <Wrench className="h-3 w-3 text-[#625f50]" />;
-  }
-}
-
-function assistantLabel(
-  kind: "clarification" | "chat" | "unknown" | "tool_call" | "finish",
-) {
-  switch (kind) {
-    case "clarification":
-      return "需要补充";
-    case "chat":
-      return "对话";
-    case "finish":
-      return "完成";
-    case "unknown":
-      return "无法理解";
-    case "tool_call":
-      return "工具调用";
-  }
-}
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 function toolLabel(tool: string): string {
   switch (tool) {
