@@ -1,4 +1,5 @@
 # VocaFlow
+demo视频：https://www.bilibili.com/video/BV1y1VD6DEJv
 
 VocaFlow 是一个 AI 驱动的语音日历助手。用户可以通过文字或语音与日历 Agent 对话，查询、创建和删除日程，并在写操作执行前通过界面确认。
 
