@@ -7,6 +7,7 @@ import {
   isCalendarTool,
   buildDisplayMessages,
   shouldStopVoice,
+  VoiceApproval,
   type StreamState,
   type ToolActivity,
 } from "../../../frontend/hooks/useAgentSession";
@@ -514,4 +515,99 @@ test("shouldStopVoice returns false when no blocker or not listening", () => {
   assert.equal(shouldStopVoice(true, false), false);
   // 无 blocker 且未在录音 → 无需停止
   assert.equal(shouldStopVoice(false, false), false);
+});
+
+// ---------------------------------------------------------------------------
+// VoiceApproval — 审批提示播报状态机（submitText / runResume 共享）
+// ---------------------------------------------------------------------------
+
+test("VoiceApproval: voice turn first interrupt → play", () => {
+  let s = VoiceApproval.startTurn(true);
+  const r = VoiceApproval.tryPrompt(s);
+  assert.equal(r.play, true);
+  s = r.state;
+  assert.equal(s.prompted, true);
+  assert.equal(s.voiceTurn, true);
+});
+
+test("VoiceApproval: same interrupt after prompt → silent", () => {
+  let s = VoiceApproval.startTurn(true);
+  const r1 = VoiceApproval.tryPrompt(s);
+  s = r1.state;
+  assert.equal(r1.play, true);
+
+  // React re-render / duplicate event should not re-play
+  const r2 = VoiceApproval.tryPrompt(s);
+  s = r2.state;
+  assert.equal(r2.play, false);
+  assert.equal(s.prompted, true);
+});
+
+test("VoiceApproval: resume reset allows new interrupt to play again", () => {
+  let s = VoiceApproval.startTurn(true);
+
+  // First interrupt plays
+  const r1 = VoiceApproval.tryPrompt(s);
+  s = r1.state;
+  assert.equal(r1.play, true);
+
+  // User confirms → enters runResume → resetForNewAction
+  s = VoiceApproval.resetForNewAction(s);
+  assert.equal(s.prompted, false);
+  assert.equal(s.voiceTurn, true); // still same voice turn
+
+  // Resume produces a new interrupt → should play again
+  const r2 = VoiceApproval.tryPrompt(s);
+  s = r2.state;
+  assert.equal(r2.play, true);
+  assert.equal(s.prompted, true);
+});
+
+test("VoiceApproval: text turn never plays", () => {
+  let s = VoiceApproval.startTurn(false);
+  assert.equal(s.voiceTurn, false);
+
+  const r = VoiceApproval.tryPrompt(s);
+  s = r.state;
+  assert.equal(r.play, false);
+  assert.equal(s.prompted, false);
+
+  // Even after reset, still silent
+  s = VoiceApproval.resetForNewAction(s);
+  const r2 = VoiceApproval.tryPrompt(s);
+  assert.equal(r2.play, false);
+});
+
+test("VoiceApproval: consecutive interrupts without reset → only first plays", () => {
+  let s = VoiceApproval.startTurn(true);
+
+  // interrupt A plays
+  const r1 = VoiceApproval.tryPrompt(s);
+  s = r1.state;
+  assert.equal(r1.play, true);
+
+  // interrupt B (pendingAction A→B directly, no null transition)
+  // Without resetForNewAction, should be silent — depends on caller discipline
+  const r2 = VoiceApproval.tryPrompt(s);
+  s = r2.state;
+  assert.equal(r2.play, false);
+});
+
+test("VoiceApproval: startTurn resets both voiceTurn and prompted", () => {
+  let s = VoiceApproval.startTurn(true);
+  const r = VoiceApproval.tryPrompt(s);
+  s = r.state;
+  assert.equal(r.play, true);
+
+  // New text turn
+  s = VoiceApproval.startTurn(false);
+  assert.equal(s.voiceTurn, false);
+  assert.equal(s.prompted, false);
+
+  // New voice turn
+  s = VoiceApproval.startTurn(true);
+  assert.equal(s.voiceTurn, true);
+  assert.equal(s.prompted, false);
+  const r2 = VoiceApproval.tryPrompt(s);
+  assert.equal(r2.play, true);
 });

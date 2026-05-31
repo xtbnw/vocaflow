@@ -42,6 +42,38 @@ export function shouldStopVoice(hasBlocker: boolean, isListening: boolean): bool
 }
 
 // ---------------------------------------------------------------------------
+// VoiceApproval — 纯状态机：管理审批提示播报生命周期（可独立测试）
+// ---------------------------------------------------------------------------
+
+export interface VoiceApprovalState {
+  readonly voiceTurn: boolean;
+  readonly prompted: boolean;
+}
+
+export const VoiceApproval = {
+  /** 新轮次开始：设置是否语音轮次，重置提示标记。 */
+  startTurn(voice: boolean): VoiceApprovalState {
+    return { voiceTurn: voice, prompted: false };
+  },
+
+  /** 进入 resume 前重置提示标记，使新 pendingAction 可以再次播报。 */
+  resetForNewAction(state: VoiceApprovalState): VoiceApprovalState {
+    return { ...state, prompted: false };
+  },
+
+  /**
+   * 尝试标记已播报。若为语音轮次且尚未播报，返回 play=true 并标记。
+   * 纯函数，不产生副作用。
+   */
+  tryPrompt(state: VoiceApprovalState): { state: VoiceApprovalState; play: boolean } {
+    if (state.voiceTurn && !state.prompted) {
+      return { state: { ...state, prompted: true }, play: true };
+    }
+    return { state, play: false };
+  },
+};
+
+// ---------------------------------------------------------------------------
 // StreamState — 纯 reducer（可独立测试）
 // ---------------------------------------------------------------------------
 
@@ -208,6 +240,9 @@ export function useAgentSession(
   const messagesRef = useRef<SessionMessage[]>([]);
   messagesRef.current = messages;
 
+  // 追踪当前提交来源 + 审批提示播报状态（纯状态机管理生命周期）
+  const approvalRef = useRef<VoiceApprovalState>(VoiceApproval.startTurn(false));
+
   /** 懒加载 TtsController，同一 hook 实例复用 */
   function getTts(): TtsController {
     if (!ttsRef.current) {
@@ -223,6 +258,26 @@ export function useAgentSession(
     return ttsRef.current;
   }
 
+  // 备用的补充清理：当 pendingAction 变为 null 时重置提示标记。
+  // 主力重置在 submitText() 和 runResume() 中显式调用，本 effect 仅兜底。
+  useEffect(() => {
+    if (!pendingAction) {
+      approvalRef.current = VoiceApproval.resetForNewAction(approvalRef.current);
+    }
+  }, [pendingAction]);
+
+  /** 共享审批提示播报：取消当前 TTS → 启动短 session → 播报固定文本 → finish */
+  function playApprovalPrompt(): void {
+    const tts = getTts();
+    tts.cancel();
+    tts.start()
+      .then(() => {
+        tts.appendText("操作已准备好，请在界面确认。");
+        tts.finish();
+      })
+      .catch(() => {});
+  }
+
   // 组件卸载时终止所有进行中的流并释放 TTS
   useEffect(() => {
     return () => {
@@ -235,6 +290,7 @@ export function useAgentSession(
     async (text: string, source: SubmitSource = "text") => {
       // 终止上一轮残留请求（含进行中的 resume）
       abortRef.current?.abort();
+      approvalRef.current = VoiceApproval.startTurn(source === "voice");
       if (source === "voice") {
         ttsRef.current?.cancel();
       }
@@ -286,6 +342,13 @@ export function useAgentSession(
                 payload: event.review.arguments,
                 createdAt: new Date().toISOString(),
               });
+
+              // 语音发起轮次：播报固定审批提示（仅一次）
+              const promptResult = VoiceApproval.tryPrompt(approvalRef.current);
+              approvalRef.current = promptResult.state;
+              if (promptResult.play) {
+                playApprovalPrompt();
+              }
               return;
             }
 
@@ -367,6 +430,10 @@ export function useAgentSession(
   const runResume = useCallback(
     async (decision: "approve" | "reject", preSubmit: SessionMessage[], savedPendingAction: PendingAction) => {
       abortRef.current?.abort();
+
+      // 进入 resume 前重置提示标记，使后续新的 interrupt 可以再次播报
+      approvalRef.current = VoiceApproval.resetForNewAction(approvalRef.current);
+
       const controller = new AbortController();
       abortRef.current = controller;
 
@@ -391,6 +458,13 @@ export function useAgentSession(
                 payload: event.review.arguments,
                 createdAt: new Date().toISOString(),
               });
+
+              // 语音发起轮次：resume 后新的 interrupt 也可播报（已在 runResume 入口重置标记）
+              const promptResult = VoiceApproval.tryPrompt(approvalRef.current);
+              approvalRef.current = promptResult.state;
+              if (promptResult.play) {
+                playApprovalPrompt();
+              }
               return;
             }
 

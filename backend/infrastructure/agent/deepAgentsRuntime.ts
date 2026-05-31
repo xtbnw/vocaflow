@@ -17,6 +17,7 @@ import {
 } from "../../domain/calendarTypes";
 import { queryEventsHandler } from "../../app/calendarToolHandlers";
 import { createCreateEventTool, createDeleteEventTool } from "./calendarWriteTools";
+import { sanitizeAssistantText } from "../../shared/assistantTextSanitizer";
 
 export interface DeepAgentsRuntimeDeps {
   createLLM?: () => ChatDeepSeek;
@@ -105,7 +106,11 @@ export function buildSystemPrompt(): string {
 - create_event：创建日程。调用后系统会自动展示最终审批面板。
 - delete_event：删除日程。调用后系统会自动展示最终审批面板。
 
-请使用中文回复，保持简洁清晰。
+请使用中文回复，保持简洁清晰。只输出适合直接展示和语音播报的简单纯文本：
+- 不要使用 Markdown，不要使用星号、井号、反引号、下划线或表格。
+- 不要使用项目符号列表。需要列举时，使用简短的自然语言句子。
+- 日期和时间使用适合朗读的口语表达。例如：“6月2日，也就是周二，上午的10点到11点有场前端开发面试，其余时间都没有安排。”
+- 查询一周安排时，不要先复述完整的日期范围，不要输出“安排如下”。直接说明有日程的日期和空闲情况。
 
 ## 通用原则
 1. 用户提供的信息可能不完整或模糊。允许通过多轮对话逐步澄清，不要猜测关键字段。
@@ -290,11 +295,9 @@ export class DeepAgentsRuntime implements AgentRuntime {
             if (msgEvent === "content-block-delta") {
               const delta = data.delta as Record<string, unknown> | undefined;
               if (delta?.type === "text-delta" && typeof delta.text === "string" && delta.text.length > 0) {
-                yield {
-                  type: "message_delta",
-                  messageId: currentMessageId,
-                  text: delta.text,
-                };
+                const text = sanitizeAssistantText(delta.text);
+                if (text.length === 0) continue;
+                yield { type: "message_delta", messageId: currentMessageId, text };
               }
               continue;
             }

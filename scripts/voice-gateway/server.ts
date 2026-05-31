@@ -4,6 +4,7 @@
 
 import { WebSocketServer, WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
+import { loadEnvConfig } from "@next/env";
 import {
   Event,
   MessageType,
@@ -39,6 +40,8 @@ import { resolveGatewayConfig } from "./gatewayConfig";
 import { abortSocketSafely } from "./abortSocket";
 
 // -- 配置 --
+
+loadEnvConfig(process.cwd());
 
 const VOLCENGINE_API_KEY = process.env.VOLCENGINE_TTS_API_KEY;
 const VOLCENGINE_SPEAKER = process.env.VOLCENGINE_TTS_SPEAKER;

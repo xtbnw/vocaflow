@@ -5,11 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-npm run dev       # 启动开发服务器 (localhost:3000)
-npm run build     # 生产构建
-npm start         # 启动生产服务
-npm run lint      # ESLint 检查
+npm run dev          # 启动开发服务器 (localhost:3000)
+npm run voice:gateway # 启动语音 TTS 网关 (localhost:3101)
+npm run build        # 生产构建
+npm start            # 启动生产服务
+npm run lint         # ESLint 检查
 ```
+
+开发时需要分别启动 `npm run dev` 和 `npm run voice:gateway`。语音网关不可用时，文字日历功能仍可正常使用。
 
 ```bash
 npm test              # 运行确定性单元测试 (不访问网络, tsx + node:test)
@@ -86,6 +89,16 @@ VocaFlow 是一个 AI 驱动的语音日历助手，采用 **Next.js 15 App Rout
 - 首版关闭 DeepSeek thinking mode（`DEFAULT_LLM_CONFIG.modelKwargs.thinking.type = "disabled"`）
 - 后续根据任务复杂度、token 消耗和维护成本评估是否降级为 LangChain `createAgent()`
 
+### 语音交互架构
+
+**ASR（语音识别）**: 首版使用浏览器原生 `SpeechRecognition` API（`frontend/infrastructure/asr/`），不上报音频数据到服务端。仅 Chrome/Edge 等 Chromium 内核浏览器可用。
+
+**TTS（语音合成）**: 豆包双向流式 TTS API（`seed-tts-2.0-standard`）通过独立 Node WebSocket 网关代理（`scripts/voice-gateway/`），浏览器不持有 API 密钥。网关启动后监听 `VOICE_GATEWAY_HOST:VOICE_GATEWAY_PORT`，浏览器通过 `NEXT_PUBLIC_VOICE_GATEWAY_URL` 连接。
+
+**播报策略**: 仅 `source === "voice"` 的提交触发 TTS 播报；键盘输入保持安静。进入写操作审批时，语音轮次只播报固定短提示"操作已准备好，请在界面确认。"，不朗读完整审批预览，不增加语音审批指令。
+
+**VAD 自动打断**: 首版轻量启发式 VAD（`frontend/infrastructure/vad/`）基于 RMS 能量阈值，播报期间默认开启。提供 UI 开关（通过 localStorage 持久化），关闭后需点击麦克风手动打断。点击麦克风打断始终可用，作为稳定兜底。VAD 权限失败自动降级为仅手动模式。
+
 ### 当前结构
 
 ```
@@ -105,14 +118,20 @@ frontend/
   api/
     agentClient.ts       # Agent API 客户端 SSE 封装
   hooks/
-    useAgentSession.ts   # threadId 生命周期 + 流式状态聚合 Hook
-    useVoiceInput.ts     # 语音输入 Hook
+    useAgentSession.ts   # threadId 生命周期 + 流式状态聚合 + TTS 审批提示
+    useVoiceInput.ts     # 语音输入 Hook (ASR + 自动提交)
     useCalendarEvents.tsx # 日历事件共享 Context + Hook
-  infrastructure/asr/    # 浏览器 ASR (Web Speech API)
-    webSpeechASRProvider.ts
-    noopASRProvider.ts
-    asrProviderFactory.ts
-    speechRecognition.d.ts
+    voiceAutoSubmitController.ts # 语音 final 防抖 800ms 自动提交控制器
+  infrastructure/
+    asr/                 # 浏览器 ASR (Web Speech API)
+    tts/                 # 客户端 TTS (WebSocket → PCM 播放)
+      ttsController.ts   # TTS session 生命周期管理
+      pcmPlayer.ts       # Web Audio PCM 播放队列
+      voiceGatewayProtocol.ts # 浏览器-网关 JSON 协议
+    vad/                 # 轻量 VAD 检测与打断
+      vadDetector.ts     # RMS 能量阈值 + VAD 决策逻辑
+      vadController.ts   # 浏览器 VAD 生命周期 (getUserMedia)
+      bargeIn.ts         # 打断编排 (cancelTts → abortSse → startAsr)
   components/
     AppFrame.tsx          # 应用壳: 侧边导航 + 顶部移动端导航 + VoiceCommandBar
     VoiceCommandBar.tsx   # 底部语音/文字输入栏 (展示与事件绑定)
@@ -141,6 +160,17 @@ backend/
   shared/
     timeUtils.ts          # 共享时间工具 (基于 epoch 毫秒比较)
     sseEncoder.ts         # SSE 编码与 ReadableStream 转换
+scripts/
+  voice-gateway/          # 豆包双向流式 TTS WebSocket 网关 (独立 Node 进程)
+    server.ts             # 网关入口 + WebSocket 服务器
+    doubaoProtocol.ts     # 豆包二进制协议帧编码/解码
+    sessionStateMachine.ts # 单活跃 session 状态机
+    gatewayConfig.ts      # 网关配置解析
+    abortSocket.ts        # 安全 WebSocket 中止
+test/                     # 测试文件 (tsx + node:test)
+  scripts/voice-gateway/  # 网关协议 + 状态机测试
+  frontend/               # 前端 TTS/VAD/自动提交测试
+  backend/                # 后端 Agent/API 测试
 lib/
   utils.ts                # cn() (clsx + tailwind-merge)
 components.json           # shadcn/ui 配置: new-york 风格, neutral 色系, lucide 图标
@@ -158,6 +188,11 @@ components.json           # shadcn/ui 配置: new-york 风格, neutral 色系, l
 - **时间比较使用 epoch 毫秒**: `backend/shared/timeUtils.ts` 统一处理，避免 ISO 字符串比较
 - **自定义 CSS 类**: `vf-shell`, `vf-glass`, `vf-voice-bar`, `vf-wheel-mask` 等 `vf-*` 前缀类定义在 `globals.css`
 - **日历视图逻辑内聚在 `app/page.tsx`**: MonthView / DayView / YearView / WheelPicker / ViewPanel 均为同一文件内的私有组件
+- **ASR 为浏览器 SpeechRecognition**: 仅 Chrome/Edge 等 Chromium 内核浏览器可用，不上报音频数据
+- **豆包 TTS 通过独立网关代理**: 浏览器不持有 API 密钥，密钥仅配置在网关端
+- **仅语音发起轮次播报**: 键盘输入保持安静，写操作审批时只播报固定短提示
+- **VAD 自动打断为可关闭的首版启发式能力**: 基于 RMS 能量阈值，点击麦克风打断始终可用
+- **语音网关不可用不影响文字日历**: TTS 和 Agent 独立运行，网关关闭后文字功能仍可用
 
 ### 路径别名 (`tsconfig.json`)
 
