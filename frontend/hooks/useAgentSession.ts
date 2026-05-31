@@ -182,6 +182,10 @@ export interface AgentSessionState {
   cancelPending: () => Promise<void>;
   clearSession: () => void;
   resumeAudioContext: () => Promise<void>;
+  /** Abort the current Agent SSE stream without clearing threadId or messages. */
+  abortAgentStream: () => void;
+  /** Cancel the current TTS session and clear the PCM playback queue. */
+  cancelTts: () => void;
 }
 
 export function useAgentSession(
@@ -452,6 +456,18 @@ export function useAgentSession(
     await getTts().ensureContext();
   }, []);
 
+  const abortAgentStream = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsSubmitting(false);
+    setIsExecutingPending(false);
+  }, []);
+
+  const cancelTts = useCallback(() => {
+    ttsRef.current?.cancel();
+    setIsTtsPlaying(false);
+  }, []);
+
   return {
     threadId,
     messages,
@@ -467,5 +483,7 @@ export function useAgentSession(
     cancelPending,
     clearSession,
     resumeAudioContext,
+    abortAgentStream,
+    cancelTts,
   };
 }
