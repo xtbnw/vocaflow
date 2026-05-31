@@ -7,8 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "npx tsx --test test/backend/**/*.test.ts",
-    "test:integration": "npx tsx --test test/integration/**/*.test.ts"
+    "test": "npx tsx --test test/backend/**/*.test.ts test/scripts/**/*.test.ts",
+    "test:integration": "npx tsx --test test/integration/**/*.test.ts",
+    "voice:gateway": "tsx scripts/voice-gateway/server.ts"
   },
   "dependencies": {
     "@langchain/core": "^1.1.48",
@@ -25,6 +26,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^2.6.0",
+    "ws": "^8.18.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -33,6 +35,7 @@
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.5.13",
     "eslint": "^9.16.0",
     "eslint-config-next": "^15.1.0",
     "tailwindcss": "^4.0.0",
