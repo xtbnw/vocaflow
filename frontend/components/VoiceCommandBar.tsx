@@ -9,10 +9,15 @@ import {
   ChevronDown,
   Trash2,
   Clock,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
+  ChevronRight,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { SessionMessage } from "@/backend/domain/sessionTypes";
-import { useAgentSession } from "@/frontend/hooks/useAgentSession";
+import { useAgentSession, isCalendarTool, type ToolActivity } from "@/frontend/hooks/useAgentSession";
 import { useVoiceInput } from "@/frontend/hooks/useVoiceInput";
 import { useCalendarEventsRefresh } from "@/frontend/hooks/useCalendarEvents";
 import { ActionPreviewPanel } from "./ActionPreviewPanel";
@@ -22,10 +27,13 @@ export function VoiceCommandBar() {
   const triggerRefresh = useCalendarEventsRefresh();
 
   const {
+    threadId: _threadId,
     messages,
+    toolActivities,
     pendingAction,
     isSubmitting,
     isExecutingPending,
+    error,
     submitText,
     confirmPending,
     cancelPending,
@@ -45,7 +53,7 @@ export function VoiceCommandBar() {
   useEffect(() => {
     const el = messageListRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  }, [messages, toolActivities]);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -63,7 +71,9 @@ export function VoiceCommandBar() {
   };
 
   const hasMessages = messages.length > 0;
+  const hasToolActivities = toolActivities.length > 0;
   const latestMessage = hasMessages ? messages[messages.length - 1] : null;
+  const hasActiveTools = toolActivities.some((a) => a.status === "running");
 
   return (
     <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-50 flex flex-col items-center gap-2 px-4 pb-4">
@@ -82,6 +92,19 @@ export function VoiceCommandBar() {
                 {messages.map((msg) => (
                   <MessageBubble key={msg.id} message={msg} />
                 ))}
+
+                {hasToolActivities && (
+                  <div className="mt-2 border-t border-[#625f50]/10 pt-2">
+                    <ToolActivityList activities={toolActivities} />
+                  </div>
+                )}
+
+                {error && (
+                  <div className="mt-2 flex items-center gap-2 rounded-xl bg-[#ffdad6]/60 px-4 py-2.5 text-sm text-[#ba1a1a]">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span>{error}</span>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -120,6 +143,12 @@ export function VoiceCommandBar() {
         <div className="pointer-events-auto mb-2 flex w-full max-w-[760px] flex-col">
           <div className="vf-glass rounded-2xl border border-white/30 p-3 shadow-sm">
             <MessageBubble message={latestMessage!} />
+            {hasActiveTools && (
+              <div className="mt-2 flex items-center gap-2 rounded-lg bg-[#e8e2d0]/40 px-3 py-1.5 text-xs text-[#625f50]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                <span>正在处理...</span>
+              </div>
+            )}
           </div>
 
           {pendingAction && (
@@ -207,6 +236,115 @@ export function VoiceCommandBar() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// ToolActivityList — 工具调用状态列表
+// ---------------------------------------------------------------------------
+
+function ToolActivityList({ activities }: { activities: ToolActivity[] }) {
+  const [expandedInternal, setExpandedInternal] = useState(false);
+
+  const calendar = activities.filter((a) => isCalendarTool(a.tool));
+  const internal = activities.filter((a) => !isCalendarTool(a.tool));
+
+  const internalRunning = internal.filter((a) => a.status === "running").length;
+  const internalCompleted = internal.filter((a) => a.status === "completed").length;
+  const internalFailed = internal.filter((a) => a.status === "failed").length;
+
+  const statParts: string[] = [];
+  if (internalRunning > 0) statParts.push(`${internalRunning} 个运行中`);
+  if (internalCompleted > 0) statParts.push(`${internalCompleted} 个已完成`);
+  if (internalFailed > 0) statParts.push(`${internalFailed} 个失败`);
+
+  return (
+    <div className="space-y-1.5">
+      {calendar.map((a) => (
+        <CalendarToolCard key={a.callId} activity={a} />
+      ))}
+
+      {internal.length > 0 && (
+        <div className="rounded-lg bg-[#e8e2d0]/40 px-3 py-1.5">
+          <button
+            className="flex w-full items-center gap-1.5 text-xs text-[#625f50]"
+            onClick={() => setExpandedInternal(!expandedInternal)}
+          >
+            <ChevronRight
+              className={`h-3 w-3 transition-transform ${expandedInternal ? "rotate-90" : ""}`}
+            />
+            <Wrench className="h-3 w-3" />
+            <span>
+              {internalRunning > 0 && (
+                <span className="mr-1 inline-flex items-center gap-1">
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                </span>
+              )}
+              {statParts.join("，")}
+            </span>
+          </button>
+
+          {expandedInternal && (
+            <div className="mt-1.5 space-y-1">
+              {internal.map((a) => (
+                <div key={a.callId} className="flex items-center gap-1.5 pl-4 text-[11px] text-[#49473f]/70">
+                  <StatusIcon status={a.status} />
+                  <span className="font-medium">{a.tool}</span>
+                  {a.status === "running" && (
+                    <Loader2 className="h-2.5 w-2.5 animate-spin text-[#625f50]" />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CalendarToolCard — 日历工具详细卡片
+// ---------------------------------------------------------------------------
+
+function CalendarToolCard({ activity }: { activity: ToolActivity }) {
+  return (
+    <div className="flex items-start gap-2 rounded-lg bg-white/50 px-3 py-2">
+      <StatusIcon status={activity.status} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-medium text-[#1c1b1b]">
+            {toolLabel(activity.tool)}
+          </span>
+          {activity.status === "running" && (
+            <Loader2 className="h-3 w-3 animate-spin text-[#625f50]" />
+          )}
+        </div>
+        {activity.arguments != null && (
+          <div className="mt-0.5 text-[11px] text-[#49473f]/60 truncate">
+            {formatArgsSummary(activity.arguments as Record<string, unknown>)}
+          </div>
+        )}
+        {activity.status === "failed" && activity.message && (
+          <div className="mt-0.5 text-[11px] text-[#ba1a1a]">{activity.message}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StatusIcon({ status }: { status: ToolActivity["status"] }) {
+  switch (status) {
+    case "running":
+      return <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#625f50]" />;
+    case "completed":
+      return <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[#2e7d32]" />;
+    case "failed":
+      return <XCircle className="h-3.5 w-3.5 shrink-0 text-[#ba1a1a]" />;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MessageBubble
+// ---------------------------------------------------------------------------
+
 function MessageBubble({ message }: { message: SessionMessage }) {
   switch (message.kind) {
     case "user":
@@ -251,6 +389,10 @@ function MessageBubble({ message }: { message: SessionMessage }) {
 
   }
 }
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 function toolLabel(tool: string): string {
   switch (tool) {

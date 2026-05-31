@@ -7,7 +7,7 @@ import { createDeepAgent } from "deepagents";
 import type { DeepAgent } from "deepagents";
 import { tool, type StructuredToolInterface } from "@langchain/core/tools";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
-import type { AgentRuntime } from "../../domain/agentRuntime";
+import type { AgentRuntime, AgentStreamEvent } from "../../domain/agentRuntime";
 import type { CalendarRepository } from "../../domain/calendarRepository";
 import {
   QueryEventsArgsSchema,
@@ -130,7 +130,182 @@ export class DeepAgentsRuntime implements AgentRuntime {
     return { messages };
   }
 
+  async *stream(message: string, threadId: string, signal?: AbortSignal): AsyncIterable<AgentStreamEvent> {
+    yield { type: "thread", threadId };
+
+    // signal 在进入方法前已 abort，直接退出
+    if (signal?.aborted) return;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let eventStream: any = undefined;
+    let completed = false;
+
+    try {
+      eventStream = await this._agent.streamEvents(
+        { messages: [new HumanMessage(message)] },
+        {
+          configurable: { thread_id: threadId },
+          version: "v3",
+          ...(signal ? { signal } : {}),
+        },
+      );
+
+      // eventStream 创建后 signal 已 abort：立即 abort 并退出
+      if (signal?.aborted) {
+        try { await eventStream.abort?.(new Error("Client disconnected")); } catch {}
+        return;
+      }
+
+      // 注册 onAbort：signal 触发时立即调用底层 abort 终止 Deep Agents run
+      const onAbort = () => {
+        try { eventStream?.abort?.(new Error("Client disconnected")); } catch {}
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+
+      try {
+        let currentMessageId = "";
+        const toolNames = new Map<string, string>();
+
+        for await (const event of eventStream) {
+          if (signal?.aborted) break;
+
+          const method = event.method;
+          const data = event.params.data as Record<string, unknown>;
+
+          if (method === "messages") {
+            const msgEvent = data.event as string;
+
+            if (msgEvent === "message-start" && typeof data.id === "string") {
+              currentMessageId = data.id;
+              continue;
+            }
+
+            if (msgEvent === "content-block-delta") {
+              const delta = data.delta as Record<string, unknown> | undefined;
+              if (delta?.type === "text-delta" && typeof delta.text === "string" && delta.text.length > 0) {
+                yield {
+                  type: "message_delta",
+                  messageId: currentMessageId,
+                  text: delta.text,
+                };
+              }
+              continue;
+            }
+          }
+
+          if (method === "tools") {
+            const toolEvent = data.event as string;
+            const callId = (data.tool_call_id as string) ?? "";
+
+            if (toolEvent === "tool-started") {
+              const toolName = (data.tool_name as string) ?? "";
+              if (callId) toolNames.set(callId, toolName);
+              yield {
+                type: "tool_started",
+                callId,
+                tool: toolName,
+                arguments: data.input ?? {},
+              };
+              continue;
+            }
+
+            if (toolEvent === "tool-finished") {
+              yield {
+                type: "tool_finished",
+                callId,
+                tool: toolNames.get(callId) ?? "",
+                result: data.output,
+              };
+              continue;
+            }
+
+            if (toolEvent === "tool-error") {
+              yield {
+                type: "tool_error",
+                callId,
+                tool: toolNames.get(callId) ?? "",
+                message: (data.message as string) ?? "工具执行失败",
+              };
+              continue;
+            }
+          }
+        }
+
+        // 未 abort 时正常结束
+        if (!signal?.aborted) {
+          completed = true;
+          yield { type: "done" };
+        }
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
+      }
+    } catch (err) {
+      if (!signal?.aborted) {
+        yield {
+          type: "error",
+          code: classifyStreamError(err),
+          message: err instanceof Error ? err.message : String(err),
+        };
+      }
+    } finally {
+      // 幂等兜底：未正常完成且有 eventStream 时确保底层 run 终止
+      if (!completed && eventStream && typeof eventStream.abort === "function") {
+        try { await eventStream.abort(new Error("Client disconnected")); } catch {}
+      }
+    }
+  }
+
   async deleteThread(threadId: string): Promise<void> {
     await this._checkpointer.deleteThread(threadId);
   }
+}
+
+/** 将 streamEvents 抛出的底层异常映射为稳定错误码。 */
+export function classifyStreamError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return "STREAM_ERROR";
+  }
+  const msg = error.message.toLowerCase();
+  // 网络不可达
+  if (
+    msg.includes("fetch") ||
+    msg.includes("econnrefused") ||
+    msg.includes("enotfound") ||
+    msg.includes("econnreset") ||
+    msg.includes("network") ||
+    msg.includes("timeout") ||
+    msg.includes("abort")
+  ) {
+    return "NETWORK_ERROR";
+  }
+  // 鉴权失败 (HTTP 401/403)
+  if (
+    msg.includes("401") ||
+    msg.includes("403") ||
+    msg.includes("unauthorized") ||
+    msg.includes("authentication") ||
+    msg.includes("invalid api key")
+  ) {
+    return "AUTH_ERROR";
+  }
+  // 限流 (HTTP 429)
+  if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests")) {
+    return "RATE_LIMITED";
+  }
+  // 模型协议异常 (schema mismatch, invalid response)
+  if (
+    msg.includes("schema") ||
+    msg.includes("validation") ||
+    msg.includes("parse") ||
+    msg.includes("unexpected") ||
+    msg.includes("invalid") ||
+    msg.includes("did not match")
+  ) {
+    return "MODEL_ERROR";
+  }
+  // 工具执行异常
+  if (msg.includes("tool") || msg.includes("handler")) {
+    return "TOOL_ERROR";
+  }
+  return "STREAM_ERROR";
 }
