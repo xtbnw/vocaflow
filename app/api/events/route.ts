@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { serverCalendarRepository } from "@/backend/bootstrap/serverAgentRuntime";
+import { serverDeepAgentsRuntime } from "@/backend/bootstrap/serverDeepAgentsRuntime";
 
 export async function GET() {
   return NextResponse.json({
-    events: await serverCalendarRepository.list(),
+    events: await serverDeepAgentsRuntime.list(),
   });
 }

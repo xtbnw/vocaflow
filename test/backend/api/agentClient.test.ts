@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, beforeEach, afterEach } from "node:test";
-import { streamMessage } from "../../../frontend/api/agentClient";
+import { streamMessage, resumeMessage } from "../../../frontend/api/agentClient";
 import type { AgentStreamEvent } from "../../../backend/domain/agentRuntime";
 
 // ---------------------------------------------------------------------------
@@ -274,4 +274,163 @@ test("streamMessage ignores corrupt JSON lines without breaking stream", async (
   assert.equal(events[0].type, "thread");
   assert.equal((events[0] as { threadId: string }).threadId, "t-corr");
   assert.equal(events[1].type, "done");
+});
+
+// ---------------------------------------------------------------------------
+// resumeMessage tests
+// ---------------------------------------------------------------------------
+
+test("resumeMessage sends correct request body with threadId and decision", async () => {
+  mockFetchSSE([
+    { type: "thread", threadId: "t-resume" },
+    { type: "done" },
+  ]);
+
+  await resumeMessage("t-resume", "approve", () => {});
+
+  assert.ok(capturedInit, "Expected fetch to be called");
+  assert.equal(capturedInit!.method, "POST");
+  assert.equal(
+    capturedInit!.headers?.["Content-Type"] as string,
+    "application/json",
+  );
+
+  const body = JSON.parse(capturedInit!.body as string);
+  assert.equal(body.threadId, "t-resume");
+  assert.equal(body.decision, "approve");
+});
+
+test("resumeMessage sends reject decision correctly", async () => {
+  mockFetchSSE([
+    { type: "thread", threadId: "t-rej" },
+    { type: "done" },
+  ]);
+
+  await resumeMessage("t-rej", "reject", () => {});
+
+  const body = JSON.parse(capturedInit!.body as string);
+  assert.equal(body.threadId, "t-rej");
+  assert.equal(body.decision, "reject");
+});
+
+test("resumeMessage triggers onEvent for each SSE event in order", async () => {
+  mockFetchSSE([
+    { type: "thread", threadId: "t2" },
+    { type: "message_delta", messageId: "m1", text: "已批准" },
+    { type: "done" },
+  ]);
+
+  const events: AgentStreamEvent[] = [];
+  await resumeMessage("t2", "approve", (e) => events.push(e));
+
+  assert.equal(events.length, 3);
+  assert.equal(events[0].type, "thread");
+  assert.equal(events[1].type, "message_delta");
+  assert.equal(events[2].type, "done");
+});
+
+test("resumeMessage SSE events include interrupt event", async () => {
+  mockFetchSSE([
+    { type: "thread", threadId: "t-int" },
+    {
+      type: "interrupt",
+      review: {
+        kind: "tool_review",
+        action: "create_event",
+        arguments: { title: "测试" },
+        preview: {
+          title: "创建日程",
+          summary: "测试",
+          items: [{ label: "标题", value: "测试" }],
+        },
+      },
+    },
+  ]);
+
+  const events: AgentStreamEvent[] = [];
+  await resumeMessage("t-int", "approve", (e) => events.push(e));
+
+  assert.equal(events.length, 2);
+  assert.equal(events[0].type, "thread");
+  assert.equal(events[1].type, "interrupt");
+  if (events[1].type === "interrupt") {
+    assert.equal(events[1].review.action, "create_event");
+  }
+});
+
+test("resumeMessage throws on non-2xx response with error message", async () => {
+  mockFetchSSE([], { status: 500, errorMessage: "内部错误" });
+
+  await assert.rejects(
+    resumeMessage("t-err", "approve", () => {}),
+    (err: Error) => err.message === "内部错误",
+  );
+});
+
+test("resumeMessage throws on 400 with default message when body has no message field", async () => {
+  mockFetchSSE([], { status: 400, errorMessage: undefined });
+
+  await assert.rejects(
+    resumeMessage("t-400", "approve", () => {}),
+    (err: Error) => err.message === "请求失败",
+  );
+});
+
+test("resumeMessage passes signal to fetch", async () => {
+  mockFetchSSE([
+    { type: "thread", threadId: "t-sig" },
+    { type: "done" },
+  ]);
+
+  const controller = new AbortController();
+  await resumeMessage("t-sig", "approve", () => {}, controller.signal);
+
+  assert.ok(capturedInit, "Expected fetch to be called with init");
+  assert.equal(capturedInit!.signal, controller.signal);
+});
+
+test("resumeMessage handles AbortError from fetch without throwing", async () => {
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: RequestInfo, init?: RequestInit) => {
+    capturedInit = init;
+    const err = new Error("The operation was aborted.");
+    err.name = "AbortError";
+    throw err;
+  }) as typeof globalThis.fetch;
+
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.doesNotReject(
+    resumeMessage("t-abort", "approve", () => {}, controller.signal),
+  );
+});
+
+test("resumeMessage handles AbortError from reader without throwing", async () => {
+  const encoder = new TextEncoder();
+  const firstChunk = encoder.encode(
+    `event: thread\ndata: ${JSON.stringify({ type: "thread", threadId: "t-read" })}\n\n`,
+  );
+
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    const stream = new ReadableStream({
+      start(streamController) {
+        streamController.enqueue(firstChunk);
+      },
+      pull(streamController) {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        streamController.error(err);
+      },
+    });
+    return new Response(stream, { status: 200 });
+  }) as typeof globalThis.fetch;
+
+  const events: AgentStreamEvent[] = [];
+  await assert.doesNotReject(
+    resumeMessage("t-read", "approve", (e) => events.push(e)),
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "thread");
 });

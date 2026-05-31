@@ -1,3 +1,21 @@
+/** 写入操作审批中断 payload。 */
+export type ToolReviewInterrupt = {
+  kind: "tool_review";
+  action: "create_event" | "delete_event";
+  arguments: Record<string, unknown>;
+  preview: {
+    title: string;
+    summary: string;
+    items: { label: string; value: string }[];
+    warnings?: string[];
+  };
+};
+
+/** 审批决策 payload。 */
+export type ToolReviewDecision = {
+  decision: "approve" | "reject";
+};
+
 /** 应用层稳定 SSE 事件协议，不暴露 LangChain 内部事件到前端。 */
 export type AgentStreamEvent =
   | { type: "thread"; threadId: string }
@@ -5,6 +23,8 @@ export type AgentStreamEvent =
   | { type: "tool_started"; callId: string; tool: string; arguments: unknown }
   | { type: "tool_finished"; callId: string; tool: string; result: unknown }
   | { type: "tool_error"; callId: string; tool: string; message: string }
+  | { type: "interrupt"; review: ToolReviewInterrupt }
+  | { type: "events_changed" }
   | { type: "done" }
   | { type: "error"; code: string; message: string };
 
@@ -31,8 +51,15 @@ export interface AgentRuntime {
    * 以 SSE 兼容的异步迭代器流式返回 agent 事件。
    * 首个事件固定为 thread，结束时发送 done。
    * 出错时发送 error 事件并终止迭代。
+   * 工具调用触发 interrupt 时发送 interrupt 事件并终止迭代。
    */
   stream(message: string, threadId: string, signal?: AbortSignal): AsyncIterable<AgentStreamEvent>;
+
+  /**
+   * 使用审批决策恢复暂停的 graph 执行。
+   * 以 SSE 兼容的异步迭代器流式返回后续 agent 事件。
+   */
+  resume(decision: ToolReviewDecision, threadId: string, signal?: AbortSignal): AsyncIterable<AgentStreamEvent>;
 
   /**
    * 删除指定线程的 checkpoint 状态。

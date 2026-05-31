@@ -1,22 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { sessionStore } from "@/backend/app/sessionStore";
-import { serverAgentRunner } from "@/backend/bootstrap/serverAgentRuntime";
+import { serverDeepAgentsRuntime } from "@/backend/bootstrap/serverDeepAgentsRuntime";
 
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const sessionId = searchParams.get("id");
+  const threadId = searchParams.get("id");
 
-  if (!sessionId) {
+  if (!threadId) {
     return NextResponse.json(
-      { kind: "error", message: "缺少 sessionId" },
+      { kind: "error", message: "缺少 threadId" },
       { status: 400 },
     );
   }
 
-  const pendingActionIds = sessionStore.deleteSession(sessionId);
-  for (const id of pendingActionIds) {
-    serverAgentRunner.removePendingAction(id);
-  }
+  await serverDeepAgentsRuntime.deleteThread(threadId);
 
   return NextResponse.json({ kind: "ok" });
 }

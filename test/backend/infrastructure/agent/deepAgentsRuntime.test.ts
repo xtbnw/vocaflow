@@ -18,6 +18,7 @@ import { emptyCheckpoint } from "@langchain/langgraph-checkpoint";
 import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint";
 import { AIMessage } from "@langchain/core/messages";
 import type { DeepAgent } from "deepagents";
+import { StateGraph, Annotation, Command, isGraphInterrupt } from "@langchain/langgraph";
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -329,9 +330,12 @@ test("runtime captures single business tool and scripted agent invokes query_eve
     getCheckpointer: () => stubCheckpointer(),
   });
 
-  // 断言只有一个业务工具
-  assert.equal(capturedTools.length, 1);
-  assert.equal(capturedTools[0].name, "query_events");
+  // 断言有三个业务工具
+  assert.equal(capturedTools.length, 3);
+  const toolNames = capturedTools.map((t) => t.name).sort();
+  assert.deepEqual(toolNames, ["create_event", "delete_event", "query_events"]);
+  const queryTool = capturedTools.find((t) => t.name === "query_events");
+  assert.ok(queryTool);
 
   const result = await runtime.invoke("今天有什么安排？", "thread-e2e");
 
@@ -601,6 +605,775 @@ test("SqliteSaver with :memory: DB supports full checkpoint lifecycle", async ()
   await checkpointer.deleteThread(threadId);
   tuple = await checkpointer.getTuple(config);
   assert.equal(tuple, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Interrupt & Resume tests
+// ---------------------------------------------------------------------------
+
+test("runtime registers three business tools", async () => {
+  let capturedTools: any[] = [];
+  const repo = stubRepo();
+
+  new DeepAgentsRuntime(repo, {
+    createLLM: () => ({ model: "mock" }) as any,
+    createAgent: (_llm, tools) => {
+      capturedTools = tools;
+      return { invoke: async () => ({ messages: [] }) } as any;
+    },
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  assert.equal(capturedTools.length, 3);
+  const names = capturedTools.map((t) => t.name).sort();
+  assert.deepEqual(names, ["create_event", "delete_event", "query_events"]);
+});
+
+test("runtime create_event tool has CreateEventArgsSchema", async () => {
+  let capturedTools: any[] = [];
+  const repo = stubRepo();
+
+  new DeepAgentsRuntime(repo, {
+    createLLM: () => ({ model: "mock" }) as any,
+    createAgent: (_llm, tools) => {
+      capturedTools = tools;
+      return { invoke: async () => ({ messages: [] }) } as any;
+    },
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const createTool = capturedTools.find((t) => t.name === "create_event");
+  assert.ok(createTool, "create_event tool should be registered");
+  assert.notEqual(createTool.schema, undefined);
+});
+
+test("runtime delete_event tool has DeleteEventArgsSchema", async () => {
+  let capturedTools: any[] = [];
+  const repo = stubRepo();
+
+  new DeepAgentsRuntime(repo, {
+    createLLM: () => ({ model: "mock" }) as any,
+    createAgent: (_llm, tools) => {
+      capturedTools = tools;
+      return { invoke: async () => ({ messages: [] }) } as any;
+    },
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const deleteTool = capturedTools.find((t) => t.name === "delete_event");
+  assert.ok(deleteTool, "delete_event tool should be registered");
+  assert.notEqual(deleteTool.schema, undefined);
+});
+
+test("stream yields interrupt when GraphInterrupt is caught via checkpointer fallback", async () => {
+  // 模拟：streamEvents 正常结束（没抛异常），但 checkpoint 中存在 __interrupt__
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-int-fallback";
+  const config = { configurable: { thread_id: threadId } };
+
+  try {
+    // 写入包含 interrupt 的 checkpoint（模拟 graph 中断后的状态）
+    const interruptPayload = {
+      kind: "tool_review",
+      action: "create_event",
+      arguments: { title: "测试", startAt: "2026-06-01T09:00:00.000Z" },
+      preview: {
+        title: "创建日程",
+        summary: "将在日历中创建以下日程",
+        items: [{ label: "标题", value: "测试" }],
+      },
+    };
+
+    const cp = testCheckpoint();
+    (cp as any).channel_values = {
+      __interrupt__: [{ value: interruptPayload }],
+    };
+    await checkpointer.put(config, cp, testMetadata());
+
+    // 创建 runtime，agent 不抛异常但也不设置 completed
+    const repo = stubRepo();
+    const stubAgent = {
+      streamEvents: async function* () {
+        // 模拟空流：没有 done 事件
+        yield {
+          method: "messages",
+          params: { data: { event: "message-start", id: "msg-1" } },
+        };
+        // 流自然结束，不抛异常
+      },
+    } as any;
+
+    const runtime = new DeepAgentsRuntime(repo, {
+      createLLM: () => stubAgent as any,
+      createAgent: () => stubAgent as any,
+      getCheckpointer: () => checkpointer,
+    });
+
+    const events: any[] = [];
+    for await (const ev of runtime.stream("创建测试日程", threadId)) {
+      events.push(ev);
+    }
+
+    // 应该包含 interrupt 事件
+    const interruptEv = events.find((e) => e.type === "interrupt");
+    assert.ok(interruptEv, "Expected interrupt event in stream");
+    assert.equal(interruptEv.review.kind, "tool_review");
+    assert.equal(interruptEv.review.action, "create_event");
+    assert.equal(interruptEv.review.preview.title, "创建日程");
+
+    // 不应包含 done 事件
+    const doneEv = events.find((e) => e.type === "done");
+    assert.equal(doneEv, undefined, "Expected no done event on interrupt");
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stream yields interrupt when GraphInterrupt error is thrown", async () => {
+  const repo = stubRepo();
+  const interruptPayload = {
+    kind: "tool_review",
+    action: "delete_event",
+    arguments: { eventIds: ["evt-1"] },
+    preview: {
+      title: "删除日程",
+      summary: "将删除 1 个日程",
+      items: [{ label: "日程数量", value: "1 个日程" }],
+      warnings: ["该操作会永久删除日程，不可撤销"],
+    },
+  };
+
+  // 构造一个能通过 isGraphInterrupt 检查的错误
+  const graphInterruptErr = new Error("GraphInterrupt") as any;
+  graphInterruptErr.name = "GraphInterrupt";
+  graphInterruptErr.interrupts = [{ value: interruptPayload }];
+  // 添加 GraphBubbleUp / GraphInterrupt 内部标记
+  Object.setPrototypeOf(graphInterruptErr, Error.prototype);
+
+  const stubAgent = {
+    streamEvents: async function* () {
+      yield {
+        method: "messages",
+        params: { data: { event: "message-start", id: "msg-1" } },
+      };
+      throw graphInterruptErr;
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.stream("删除日程", "thread-err-int")) {
+    events.push(ev);
+  }
+
+  // 应该包含 interrupt 事件（从 GraphInterrupt 错误中提取）
+  const interruptEv = events.find((e) => e.type === "interrupt");
+  assert.ok(interruptEv, "Expected interrupt event when GraphInterrupt is thrown");
+  assert.equal(interruptEv.review.kind, "tool_review");
+  assert.equal(interruptEv.review.action, "delete_event");
+});
+
+test("resume calls agent.streamEvents with Command containing resume value", async () => {
+  const repo = stubRepo();
+  let receivedInput: any;
+
+  const stubAgent = {
+    streamEvents: async function* (input: any) {
+      receivedInput = input;
+      yield {
+        method: "messages",
+        params: {
+          data: {
+            event: "content-block-delta",
+            delta: { type: "text-delta", text: "已批准执行" },
+          },
+        },
+      };
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.resume(
+    { decision: "approve" },
+    "thread-resume-1",
+  )) {
+    events.push(ev);
+  }
+
+  // 验证 streamEvents 收到了 Command
+  assert.ok(receivedInput, "Expected agent.streamEvents to be called");
+  // Command 实例有 lg_name 属性
+  assert.equal(receivedInput.lg_name, "Command", "Expected Command instance");
+});
+
+test("resume with reject also passes Command to agent", async () => {
+  const repo = stubRepo();
+  let receivedInput: any;
+
+  const stubAgent = {
+    streamEvents: async function* (input: any) {
+      receivedInput = input;
+      yield {
+        method: "messages",
+        params: {
+          data: {
+            event: "content-block-delta",
+            delta: { type: "text-delta", text: "已取消" },
+          },
+        },
+      };
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.resume(
+    { decision: "reject" },
+    "thread-reject-1",
+  )) {
+    events.push(ev);
+  }
+
+  assert.ok(receivedInput, "Expected agent.streamEvents to be called");
+  assert.equal(receivedInput.lg_name, "Command");
+});
+
+test("stream emits events_changed after successful create_event tool_finished", async () => {
+  const repo = stubRepo();
+  const stubAgent = {
+    streamEvents: async function* () {
+      yield {
+        method: "tools",
+        params: {
+          data: {
+            event: "tool-started",
+            tool_call_id: "call-1",
+            tool_name: "create_event",
+            input: { title: "测试" },
+          },
+        },
+      };
+      yield {
+        method: "tools",
+        params: {
+          data: {
+            event: "tool-finished",
+            tool_call_id: "call-1",
+            tool_name: "create_event",
+            output: JSON.stringify({ action: "created", event: { title: "测试" } }),
+          },
+        },
+      };
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.stream("创建日程", "thread-ev-changed")) {
+    events.push(ev);
+  }
+
+  const ec = events.find((e) => e.type === "events_changed");
+  assert.ok(ec, "Expected events_changed event after successful create_event");
+  const doneEv = events.find((e) => e.type === "done");
+  assert.ok(doneEv, "Expected done event");
+});
+
+test("stream does not emit events_changed after rejected write", async () => {
+  const repo = stubRepo();
+  const stubAgent = {
+    streamEvents: async function* () {
+      yield {
+        method: "tools",
+        params: {
+          data: {
+            event: "tool-started",
+            tool_call_id: "call-2",
+            tool_name: "delete_event",
+            input: { eventIds: ["evt-1"] },
+          },
+        },
+      };
+      yield {
+        method: "tools",
+        params: {
+          data: {
+            event: "tool-finished",
+            tool_call_id: "call-2",
+            tool_name: "delete_event",
+            output: JSON.stringify({ action: "rejected", message: "操作已取消" }),
+          },
+        },
+      };
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.stream("删除日程", "thread-rejected")) {
+    events.push(ev);
+  }
+
+  const ec = events.find((e) => e.type === "events_changed");
+  assert.equal(ec, undefined, "Expected NO events_changed for rejected action");
+});
+
+test("checkpoint rebuild — runtime re-creation with same DB preserves interrupt", async () => {
+  const { dbPath, checkpointer: saver1, db: db1, dir } = createTempCheckpointer();
+  const threadId = "thread-rebuild";
+
+  try {
+    const config = { configurable: { thread_id: threadId } };
+    const interruptPayload = {
+      kind: "tool_review",
+      action: "create_event",
+      arguments: { title: "重建测试", startAt: "2026-06-01T09:00:00.000Z" },
+      preview: {
+        title: "创建日程",
+        summary: "测试重建",
+        items: [],
+      },
+    };
+
+    // Phase 1: 用第一个 checkpointer 写入包含 interrupt 的 checkpoint
+    const cp = testCheckpoint();
+    (cp as any).channel_values = {
+      __interrupt__: [{ value: interruptPayload }],
+    };
+    await saver1.put(config, cp, testMetadata());
+    db1.close();
+
+    // Phase 2: 用同一个 dbPath 重新打开，模拟"重建 runtime"
+    const db2 = new Database(dbPath);
+    db2.pragma("journal_mode=WAL");
+    const saver2 = new SqliteSaver(db2);
+
+    try {
+      // 验证 interrupt 仍然可读
+      const tuple = await saver2.getTuple(config);
+      assert.ok(tuple, "Expected checkpoint to exist after rebuild");
+      const channelValues = tuple!.checkpoint?.channel_values as any;
+      assert.ok(channelValues, "Expected channel_values");
+      assert.ok("__interrupt__" in channelValues, "Expected __interrupt__ in channel_values");
+
+      const interrupts = channelValues.__interrupt__;
+      assert.equal(interrupts.length, 1);
+      assert.equal(interrupts[0].value.kind, "tool_review");
+
+      // 用重建的 checkpointer 创建 runtime，验证 stream 能检测到 interrupt
+      const repo = stubRepo();
+      const stubAgent = {
+        streamEvents: async function* () {
+          yield {
+            method: "messages",
+            params: { data: { event: "message-start", id: "msg-1" } },
+          };
+        },
+      } as any;
+
+      const runtime = new DeepAgentsRuntime(repo, {
+        createLLM: () => stubAgent as any,
+        createAgent: () => stubAgent as any,
+        getCheckpointer: () => saver2,
+      });
+
+      const events: any[] = [];
+      for await (const ev of runtime.stream("重建测试", threadId)) {
+        events.push(ev);
+      }
+
+      const interruptEv = events.find((e) => e.type === "interrupt");
+      assert.ok(interruptEv, "Expected interrupt event after runtime rebuild");
+      assert.equal(interruptEv.review.action, "create_event");
+    } finally {
+      db2.close();
+    }
+  } finally {
+    try { db1.close(); } catch {}
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Real LangGraph interrupt/resume tests with calendarWriteTools
+// ---------------------------------------------------------------------------
+
+/**
+ * Helper: invoke a graph and extract the interrupt value from the result.
+ * graph.invoke() includes __interrupt__ in the returned state when interrupt() is called.
+ */
+async function extractInterruptFromGraph(
+  graph: ReturnType<typeof import("@langchain/langgraph").StateGraph.prototype.compile>,
+  input: Record<string, unknown>,
+  threadId: string,
+): Promise<unknown> {
+  const result = await graph.invoke(input, { configurable: { thread_id: threadId } });
+  const interrupts = (result as Record<string, unknown>).__interrupt__ as Array<{ value: unknown }> | undefined;
+  if (interrupts && interrupts.length > 0) return interrupts[0].value;
+  return null;
+}
+
+test("real LG: create_event interrupt then approve saves exactly once", async () => {
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-lg-create-approve";
+
+  const saved: CalendarEvent[] = [];
+  const repo: CalendarRepository = {
+    list: async () => [],
+    save: async (e) => { saved.push(e as CalendarEvent); return e as CalendarEvent; },
+    update: async (e) => e as CalendarEvent,
+    delete: async () => {},
+  };
+
+  const { createCreateEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");
+  const tool = createCreateEventTool(repo);
+
+  const TestState = Annotation.Root({
+    result: Annotation<string>({
+      default: () => "",
+      reducer: (_prev: string, next: string) => next ?? _prev,
+    }),
+  });
+
+  try {
+    const graph = new StateGraph(TestState)
+      .addNode("execute", async (_state) => {
+        const r = await tool.invoke({
+          title: "新会议",
+          startAt: "2026-06-15T14:00:00.000Z",
+        });
+        return { result: r };
+      })
+      .addEdge("__start__", "execute")
+      .compile({ checkpointer });
+
+    const interruptValue = await extractInterruptFromGraph(
+      graph, { result: "" }, threadId,
+    );
+    assert.ok(interruptValue, "Expected interrupt after first invoke");
+    assert.equal((interruptValue as Record<string, unknown>).kind, "tool_review");
+    assert.equal((interruptValue as Record<string, unknown>).action, "create_event");
+    // No save before interrupt
+    assert.equal(saved.length, 0);
+
+    // Resume with approve
+    const result = await graph.invoke(
+      new Command({ resume: { decision: "approve" } }),
+      { configurable: { thread_id: threadId } },
+    );
+
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].title, "新会议");
+    assert.ok((result.result as string).includes("created"));
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("real LG: create_event interrupt then reject does NOT save", async () => {
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-lg-create-reject";
+
+  const saved: CalendarEvent[] = [];
+  const repo: CalendarRepository = {
+    list: async () => [],
+    save: async (e) => { saved.push(e as CalendarEvent); return e as CalendarEvent; },
+    update: async (e) => e as CalendarEvent,
+    delete: async () => {},
+  };
+
+  const { createCreateEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");
+  const tool = createCreateEventTool(repo);
+
+  const TestState = Annotation.Root({
+    result: Annotation<string>({
+      default: () => "",
+      reducer: (_prev: string, next: string) => next ?? _prev,
+    }),
+  });
+
+  try {
+    const graph = new StateGraph(TestState)
+      .addNode("execute", async (_state) => {
+        const r = await tool.invoke({
+          title: "废弃日程",
+          startAt: "2026-07-01T10:00:00.000Z",
+        });
+        return { result: r };
+      })
+      .addEdge("__start__", "execute")
+      .compile({ checkpointer });
+
+    const interruptValue = await extractInterruptFromGraph(
+      graph, { result: "" }, threadId,
+    );
+    assert.ok(interruptValue, "Expected interrupt");
+    assert.equal(saved.length, 0);
+
+    // Resume with reject
+    const result = await graph.invoke(
+      new Command({ resume: { decision: "reject" } }),
+      { configurable: { thread_id: threadId } },
+    );
+
+    assert.equal(saved.length, 0, "No save after reject");
+    assert.ok((result.result as string).includes("rejected"));
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("real LG: duplicate resume does not double-write", async () => {
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-lg-dup-resume";
+
+  const saved: CalendarEvent[] = [];
+  const repo: CalendarRepository = {
+    list: async () => [],
+    save: async (e) => { saved.push(e as CalendarEvent); return e as CalendarEvent; },
+    update: async (e) => e as CalendarEvent,
+    delete: async () => {},
+  };
+
+  const { createCreateEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");
+  const tool = createCreateEventTool(repo);
+
+  const TestState = Annotation.Root({
+    result: Annotation<string>({
+      default: () => "",
+      reducer: (_prev: string, next: string) => next ?? _prev,
+    }),
+  });
+
+  try {
+    const graph = new StateGraph(TestState)
+      .addNode("execute", async (_state) => {
+        const r = await tool.invoke({
+          title: "不重复日程",
+          startAt: "2026-08-01T09:00:00.000Z",
+        });
+        return { result: r };
+      })
+      .addEdge("__start__", "execute")
+      .compile({ checkpointer });
+
+    // First: trigger interrupt
+    const interruptValue = await extractInterruptFromGraph(
+      graph, { result: "" }, threadId,
+    );
+    assert.ok(interruptValue, "Expected interrupt");
+
+    // First resume: approve
+    await graph.invoke(
+      new Command({ resume: { decision: "approve" } }),
+      { configurable: { thread_id: threadId } },
+    );
+    assert.equal(saved.length, 1);
+
+    // Second resume with same thread — graph has already passed the interrupt point
+    await graph.invoke(
+      new Command({ resume: { decision: "approve" } }),
+      { configurable: { thread_id: threadId } },
+    );
+    assert.equal(saved.length, 1, "No double-save on repeated resume");
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("real LG: create_event interrupt preview includes conflict warnings", async () => {
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-lg-conflict";
+
+  const existingEvent: CalendarEvent = {
+    id: "existing-1",
+    title: "已有会议",
+    startAt: "2026-06-15T14:30:00.000Z",
+    endAt: "2026-06-15T15:30:00.000Z",
+    source: "text",
+    createdAt: "2026-05-31T12:00:00.000Z",
+    updatedAt: "2026-05-31T12:00:00.000Z",
+  };
+
+  const repo: CalendarRepository = {
+    list: async () => [existingEvent],
+    save: async (e) => e as CalendarEvent,
+    update: async (e) => e as CalendarEvent,
+    delete: async () => {},
+  };
+
+  const { createCreateEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");
+  const tool = createCreateEventTool(repo);
+
+  const TestState = Annotation.Root({
+    result: Annotation<string>({
+      default: () => "",
+      reducer: (_prev: string, next: string) => next ?? _prev,
+    }),
+  });
+
+  try {
+    const graph = new StateGraph(TestState)
+      .addNode("execute", async (_state) => {
+        const r = await tool.invoke({
+          title: "新会议",
+          startAt: "2026-06-15T14:00:00.000Z",
+          endAt: "2026-06-15T15:00:00.000Z",
+        });
+        return { result: r };
+      })
+      .addEdge("__start__", "execute")
+      .compile({ checkpointer });
+
+    const interruptValue = await extractInterruptFromGraph(
+      graph, { result: "" }, threadId,
+    );
+    assert.ok(interruptValue, "Expected interrupt");
+
+    const preview = (interruptValue as Record<string, unknown>).preview as Record<string, unknown>;
+    assert.equal(preview.title, "创建日程");
+    const warnings = preview.warnings as string[];
+    assert.ok(warnings && warnings.length > 0, "Expected conflict warnings");
+    assert.ok(warnings.some((w) => w.includes("已有会议")), `Expected warning about 已有会议, got: ${warnings.join(", ")}`);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("real LG: delete_event interrupt then reject does NOT delete", async () => {
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-lg-delete-reject";
+
+  const deleted: string[] = [];
+  const repo: CalendarRepository = {
+    list: async () => [sampleEvent],
+    save: async (e) => e as CalendarEvent,
+    update: async (e) => e as CalendarEvent,
+    delete: async (id) => { deleted.push(id as string); },
+  };
+
+  const { createDeleteEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");
+  const tool = createDeleteEventTool(repo);
+
+  const TestState = Annotation.Root({
+    result: Annotation<string>({
+      default: () => "",
+      reducer: (_prev: string, next: string) => next ?? _prev,
+    }),
+  });
+
+  try {
+    const graph = new StateGraph(TestState)
+      .addNode("execute", async (_state) => {
+        const r = await tool.invoke({ eventIds: ["evt-1"] });
+        return { result: r };
+      })
+      .addEdge("__start__", "execute")
+      .compile({ checkpointer });
+
+    const interruptValue = await extractInterruptFromGraph(
+      graph, { result: "" }, threadId,
+    );
+    assert.ok(interruptValue, "Expected interrupt");
+    assert.equal((interruptValue as Record<string, unknown>).kind, "tool_review");
+    assert.equal((interruptValue as Record<string, unknown>).action, "delete_event");
+    assert.equal(deleted.length, 0, "No delete before interrupt");
+
+    // Resume with reject
+    const result = await graph.invoke(
+      new Command({ resume: { decision: "reject" } }),
+      { configurable: { thread_id: threadId } },
+    );
+
+    assert.equal(deleted.length, 0, "No delete after reject");
+    assert.ok((result.result as string).includes("rejected"));
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("real LG: delete_event interrupt then approve deletes exactly once", async () => {
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-lg-delete-approve";
+
+  const deleted: string[] = [];
+  const repo: CalendarRepository = {
+    list: async () => [sampleEvent],
+    save: async (e) => e as CalendarEvent,
+    update: async (e) => e as CalendarEvent,
+    delete: async (id) => { deleted.push(id as string); },
+  };
+
+  const { createDeleteEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");
+  const tool = createDeleteEventTool(repo);
+
+  const TestState = Annotation.Root({
+    result: Annotation<string>({
+      default: () => "",
+      reducer: (_prev: string, next: string) => next ?? _prev,
+    }),
+  });
+
+  try {
+    const graph = new StateGraph(TestState)
+      .addNode("execute", async (_state) => {
+        const r = await tool.invoke({ eventIds: ["evt-1"] });
+        return { result: r };
+      })
+      .addEdge("__start__", "execute")
+      .compile({ checkpointer });
+
+    const interruptValue = await extractInterruptFromGraph(
+      graph, { result: "" }, threadId,
+    );
+    assert.ok(interruptValue, "Expected interrupt");
+    assert.equal(deleted.length, 0, "No delete before interrupt");
+
+    // Resume with approve
+    const result = await graph.invoke(
+      new Command({ resume: { decision: "approve" } }),
+      { configurable: { thread_id: threadId } },
+    );
+
+    assert.equal(deleted.length, 1, "Delete after approve");
+    assert.equal(deleted[0], "evt-1");
+    assert.ok((result.result as string).includes("deleted"));
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

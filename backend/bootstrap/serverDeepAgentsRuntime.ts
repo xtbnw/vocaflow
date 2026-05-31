@@ -3,7 +3,8 @@ import { dirname, join } from "node:path";
 
 import { DeepAgentsRuntime } from "../infrastructure/agent/deepAgentsRuntime";
 import { SQLiteCalendarRepository } from "../infrastructure/persistence/sqliteCalendarRepository";
-import type { AgentRuntime } from "../domain/agentRuntime";
+import type { AgentRuntime, ToolReviewDecision } from "../domain/agentRuntime";
+import type { CalendarEvent } from "../domain/calendarTypes";
 
 function getDatabasePath(): string {
   return (
@@ -13,25 +14,51 @@ function getDatabasePath(): string {
 }
 
 let _runtime: AgentRuntime | undefined;
+let _repository: SQLiteCalendarRepository | undefined;
+
+function getRepository(): SQLiteCalendarRepository {
+  if (!_repository) {
+    const dbPath = getDatabasePath();
+    mkdirSync(dirname(dbPath), { recursive: true });
+    _repository = new SQLiteCalendarRepository(dbPath);
+  }
+  return _repository;
+}
 
 function getRuntime(): AgentRuntime {
   if (!_runtime) {
-    const dbPath = getDatabasePath();
-    mkdirSync(dirname(dbPath), { recursive: true });
-    const repository = new SQLiteCalendarRepository(dbPath);
-    _runtime = new DeepAgentsRuntime(repository);
+    _runtime = new DeepAgentsRuntime(getRepository());
   }
   return _runtime;
 }
 
-/** Deep Agents 旁路运行时的懒加载单例，供 SSE 路由使用。 */
 export const serverDeepAgentsRuntime = {
   stream(message: string, threadId: string, signal?: AbortSignal) {
     return getRuntime().stream(message, threadId, signal);
+  },
+  resume(decision: ToolReviewDecision, threadId: string, signal?: AbortSignal) {
+    return getRuntime().resume(decision, threadId, signal);
+  },
+  async deleteThread(threadId: string) {
+    return getRuntime().deleteThread(threadId);
+  },
+  async list(): Promise<CalendarEvent[]> {
+    return getRepository().list();
   },
 };
 
 /** @internal 测试用：替换运行时实例。 */
 export function __overrideRuntimeForTest(runtime: AgentRuntime) {
   _runtime = runtime;
+}
+
+/** @internal 测试用：替换 repository 实例（不影响 runtime）。 */
+export function __overrideRepositoryForTest(repository: SQLiteCalendarRepository) {
+  _repository = repository;
+}
+
+/** @internal 测试用：重置所有单例状态。 */
+export function __resetForTest() {
+  _runtime = undefined;
+  _repository = undefined;
 }

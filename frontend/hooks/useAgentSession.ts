@@ -5,9 +5,8 @@ import type { AgentStreamEvent } from "@/backend/domain/agentRuntime";
 import type { SessionMessage } from "@/backend/domain/sessionTypes";
 import type { PendingAction } from "@/backend/app/types/pendingAction";
 import {
-  confirmPendingAction,
-  cancelPendingAction,
   streamMessage,
+  resumeMessage,
 } from "@/frontend/api/agentClient";
 
 // ---------------------------------------------------------------------------
@@ -27,6 +26,11 @@ const CALENDAR_TOOLS = new Set(["create_event", "query_events", "delete_event"])
 
 export function isCalendarTool(tool: string): boolean {
   return CALENDAR_TOOLS.has(tool);
+}
+
+/** 当 blocker 出现且正在录音时应停止语音识别。 */
+export function shouldStopVoice(hasBlocker: boolean, isListening: boolean): boolean {
+  return hasBlocker && isListening;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +120,12 @@ export function reduceStreamState(
         ),
       };
 
+    case "interrupt":
+      return state;
+
+    case "events_changed":
+      return state;
+
     case "done":
       return { ...state, done: true };
 
@@ -189,13 +199,14 @@ export function useAgentSession(
 
   const submitText = useCallback(
     async (text: string) => {
-      // 终止上一轮残留请求
+      // 终止上一轮残留请求（含进行中的 resume）
       abortRef.current?.abort();
 
       const controller = new AbortController();
       abortRef.current = controller;
 
       setIsSubmitting(true);
+      setIsExecutingPending(false);
       setError(null);
 
       const optimisticUser: SessionMessage = {
@@ -218,6 +229,25 @@ export function useAgentSession(
           (event) => {
             // 已 abort，忽略旧流事件避免写回已清除的 UI
             if (controller.signal.aborted) return;
+
+            // interrupt 事件：设置 pendingAction
+            if (event.type === "interrupt") {
+              setPendingAction({
+                id: "",
+                type: event.review.action,
+                status: "pending",
+                preview: event.review.preview,
+                payload: event.review.arguments,
+                createdAt: new Date().toISOString(),
+              });
+              return;
+            }
+
+            // events_changed 事件：通知外部刷新
+            if (event.type === "events_changed") {
+              onEventsChanged?.();
+              return;
+            }
 
             streamState = reduceStreamState(streamState, event);
             setThreadId(streamState.threadId);
@@ -254,36 +284,101 @@ export function useAgentSession(
 
   const confirmPending = useCallback(async () => {
     if (!pendingAction || !threadId || isExecutingPending) return;
+
+    const savedPendingAction = pendingAction;
     setIsExecutingPending(true);
-    try {
-      const result = await confirmPendingAction(threadId, pendingAction.id);
-      setThreadId(result.sessionId);
-      setMessages(result.messages);
-      setPendingAction(result.pendingAction ?? null);
-      if (result.eventsChanged) onEventsChanged?.();
-    } finally {
-      setIsExecutingPending(false);
-    }
+    setError(null);
+
+    const preSubmit = messagesRef.current;
+    await runResume("approve", preSubmit, savedPendingAction);
   }, [pendingAction, threadId, isExecutingPending, onEventsChanged]);
 
   const cancelPending = useCallback(async () => {
     if (!pendingAction || !threadId || isExecutingPending) return;
+
+    const savedPendingAction = pendingAction;
     setIsExecutingPending(true);
-    try {
-      const result = await cancelPendingAction(threadId, pendingAction.id);
-      setThreadId(result.sessionId);
-      setMessages(result.messages);
-      setPendingAction(null);
-      if (result.eventsChanged) onEventsChanged?.();
-    } finally {
-      setIsExecutingPending(false);
-    }
+    setError(null);
+
+    const preSubmit = messagesRef.current;
+    await runResume("reject", preSubmit, savedPendingAction);
   }, [pendingAction, threadId, isExecutingPending, onEventsChanged]);
+
+  /** 共享的 resume 执行逻辑：approve / reject 复用同一流程。 */
+  const runResume = useCallback(
+    async (decision: "approve" | "reject", preSubmit: SessionMessage[], savedPendingAction: PendingAction) => {
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      let streamState = initialStreamState();
+      streamState = { ...streamState, threadId };
+      let newInterruptReceived = false;
+
+      try {
+        await resumeMessage(
+          threadId!,
+          decision,
+          (event) => {
+            if (controller.signal.aborted) return;
+
+            if (event.type === "interrupt") {
+              newInterruptReceived = true;
+              setPendingAction({
+                id: "",
+                type: event.review.action,
+                status: "pending",
+                preview: event.review.preview,
+                payload: event.review.arguments,
+                createdAt: new Date().toISOString(),
+              });
+              return;
+            }
+
+            if (event.type === "events_changed") {
+              onEventsChanged?.();
+              return;
+            }
+
+            if (event.type === "done") {
+              setPendingAction(null);
+            }
+
+            streamState = reduceStreamState(streamState, event);
+            setThreadId(streamState.threadId);
+            setMessages([...preSubmit, ...streamState.messages]);
+            setToolActivities(streamState.toolActivities);
+            if (streamState.error) {
+              setError(streamState.error);
+            }
+          },
+          controller.signal,
+        );
+
+        // 日历刷新仅由 events_changed SSE 事件触发，不做无条件刷新
+        // reject / error / interrupt 不触发额外刷新
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        const message = err instanceof Error ? err.message : "请求失败";
+        setError(message);
+        if (!newInterruptReceived) {
+          setPendingAction(savedPendingAction);
+        }
+      } finally {
+        if (abortRef.current === controller) {
+          setIsExecutingPending(false);
+          abortRef.current = null;
+        }
+      }
+    },
+    [threadId, onEventsChanged],
+  );
 
   const clearSession = useCallback(async () => {
     abortRef.current?.abort();
     abortRef.current = null;
     setIsSubmitting(false);
+    setIsExecutingPending(false);
     messagesRef.current = [];
     if (threadId) {
       void fetch(`/api/session?id=${encodeURIComponent(threadId)}`, { method: "DELETE" });

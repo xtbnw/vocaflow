@@ -6,6 +6,7 @@ import {
   initialStreamState,
   isCalendarTool,
   buildDisplayMessages,
+  shouldStopVoice,
   type StreamState,
   type ToolActivity,
 } from "../../../frontend/hooks/useAgentSession";
@@ -373,4 +374,144 @@ test("buildDisplayMessages: three rounds preserve full history", () => {
   const result = buildDisplayMessages(history, optU3, stream3);
   assert.equal(result.length, 6);
   assert.deepStrictEqual(result.map((m) => m.id), ["u1", "a1", "u2", "a2", "u3", "a3"]);
+});
+
+// ---------------------------------------------------------------------------
+// Interaction tests — resume flow & submit blocking contract
+// ---------------------------------------------------------------------------
+
+test("reducer: interrupt pass-through does not set done", () => {
+  const s0 = state({ threadId: "t", messages: [asstMsg("a1", "创建中...")] });
+  const next = reduceStreamState(s0, {
+    type: "interrupt",
+    review: {
+      kind: "tool_review",
+      action: "create_event",
+      arguments: { title: "测试" },
+      preview: { title: "创建日程", summary: "", items: [] },
+    },
+  });
+  assert.equal(next.done, false);
+  assert.equal(next.error, null);
+  assert.equal(next.messages.length, 1); // messages unchanged
+});
+
+test("reducer: events_changed pass-through does not set done", () => {
+  const s0 = state({ done: false });
+  const next = reduceStreamState(s0, { type: "events_changed" });
+  assert.equal(next.done, false);
+  assert.equal(next.error, null);
+});
+
+test("reducer: resume flow approve — done clears stream error-free", () => {
+  // Simulate resume flow: thread → tool_started → tool_finished → events_changed → done
+  const events: AgentStreamEvent[] = [
+    { type: "thread", threadId: "t-resume" },
+    { type: "tool_started", callId: "c1", tool: "create_event", arguments: { title: "测试" } },
+    { type: "tool_finished", callId: "c1", tool: "create_event", result: { action: "created" } },
+    { type: "events_changed" },
+    { type: "done" },
+  ];
+
+  let s = initialStreamState();
+  for (const ev of events) {
+    s = reduceStreamState(s, ev);
+  }
+
+  assert.equal(s.threadId, "t-resume");
+  assert.equal(s.done, true);
+  assert.equal(s.error, null);
+  assert.equal(s.toolActivities.length, 1);
+  assert.equal(s.toolActivities[0].status, "completed");
+});
+
+test("reducer: resume flow reject — done without events_changed", () => {
+  // reject: tool returns "rejected" → no events_changed emitted by runtime
+  const events: AgentStreamEvent[] = [
+    { type: "thread", threadId: "t-reject" },
+    { type: "tool_started", callId: "c1", tool: "delete_event", arguments: { eventIds: ["e1"] } },
+    { type: "tool_finished", callId: "c1", tool: "delete_event", result: { action: "rejected" } },
+    { type: "done" },
+  ];
+
+  let s = initialStreamState();
+  for (const ev of events) {
+    s = reduceStreamState(s, ev);
+  }
+
+  assert.equal(s.done, true);
+  assert.equal(s.error, null);
+  assert.equal(s.toolActivities[0].status, "completed");
+});
+
+test("reducer: resume flow error — error event sets error and done", () => {
+  const events: AgentStreamEvent[] = [
+    { type: "thread", threadId: "t-err" },
+    { type: "error", code: "TOOL_ERROR", message: "写入失败" },
+  ];
+
+  let s = initialStreamState();
+  for (const ev of events) {
+    s = reduceStreamState(s, ev);
+  }
+
+  assert.equal(s.done, true);
+  assert.equal(s.error, "写入失败");
+});
+
+// ---------------------------------------------------------------------------
+// submitText blocking contract — tests the conditions used by VoiceCommandBar
+// ---------------------------------------------------------------------------
+
+/**
+ * 复现 VoiceCommandBar handleSubmit 的守卫条件，便于独立测试。
+ * isSubmitting / hasPendingAction / isExecutingPending 任一为真时阻止提交。
+ */
+function shouldBlockSubmit(
+  text: string,
+  isSubmitting: boolean,
+  hasPendingAction: boolean,
+  isExecutingPending: boolean,
+): boolean {
+  return !text.trim() || isSubmitting || hasPendingAction || isExecutingPending;
+}
+
+test("submit is blocked when pendingAction exists", () => {
+  assert.equal(shouldBlockSubmit("创建日程", false, true, false), true);
+});
+
+test("submit is blocked when isExecutingPending", () => {
+  assert.equal(shouldBlockSubmit("创建日程", false, false, true), true);
+});
+
+test("submit is blocked when isSubmitting", () => {
+  assert.equal(shouldBlockSubmit("创建日程", true, false, false), true);
+});
+
+test("submit is blocked when text is empty", () => {
+  assert.equal(shouldBlockSubmit("  ", false, false, false), true);
+});
+
+test("submit is allowed when no blockers and text present", () => {
+  assert.equal(shouldBlockSubmit("创建日程", false, false, false), false);
+});
+
+// ---------------------------------------------------------------------------
+// shouldStopVoice — voice stop boundary contract
+// ---------------------------------------------------------------------------
+
+test("shouldStopVoice returns true when blocker appears during listening", () => {
+  // pendingAction 出现 + 正在录音 → 应停止录音
+  assert.equal(shouldStopVoice(true, true), true);
+  // isExecutingPending + 正在录音 → 应停止录音
+  assert.equal(shouldStopVoice(true, true), true);
+});
+
+test("shouldStopVoice returns false when no blocker or not listening", () => {
+  // 无 blocker，正在录音 → 不应停止
+  assert.equal(shouldStopVoice(false, true), false);
+  // 有 blocker，但未在录音 → 无需停止
+  assert.equal(shouldStopVoice(true, false), false);
+  // 无 blocker 且未在录音 → 无需停止
+  assert.equal(shouldStopVoice(false, false), false);
 });

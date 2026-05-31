@@ -6,14 +6,16 @@ import { ChatDeepSeek } from "@langchain/deepseek";
 import { createDeepAgent } from "deepagents";
 import type { DeepAgent } from "deepagents";
 import { tool, type StructuredToolInterface } from "@langchain/core/tools";
+import { Command, isGraphInterrupt } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
-import type { AgentRuntime, AgentStreamEvent } from "../../domain/agentRuntime";
+import type { AgentRuntime, AgentStreamEvent, ToolReviewDecision, ToolReviewInterrupt } from "../../domain/agentRuntime";
 import type { CalendarRepository } from "../../domain/calendarRepository";
 import {
   QueryEventsArgsSchema,
   type QueryEventsArgs,
 } from "../../domain/calendarTypes";
 import { queryEventsHandler } from "../../app/calendarToolHandlers";
+import { createCreateEventTool, createDeleteEventTool } from "./calendarWriteTools";
 
 export interface DeepAgentsRuntimeDeps {
   createLLM?: () => ChatDeepSeek;
@@ -72,7 +74,8 @@ function createDefaultCheckpointer(): SqliteSaver {
 /**
  * Deep Agents 运行时。
  *
- * 注册只读 query_events 工具，不注册 create_event 或 delete_event。
+ * 注册 query_events、create_event、delete_event 三个业务工具。
+ * 写操作（create/delete）内嵌 interrupt 审批流程，需前端 confirm/resume 后执行。
  * 使用 Deep Agents 默认 StateBackend（thread 内临时虚拟文件，不接触宿主文件系统）。
  * Tavily、sandbox、shell、宿主文件系统访问通过默认 StateBackend 保持隔离。
  * 通过 Deps 注入支持单元测试（测试替身），默认走正式链路。
@@ -90,7 +93,11 @@ export class DeepAgentsRuntime implements AgentRuntime {
       ? deps.createLLM()
       : new ChatDeepSeek(DEFAULT_LLM_CONFIG);
 
-    const tools = [createQueryEventsTool(repository)];
+    const tools: StructuredToolInterface[] = [
+      createQueryEventsTool(repository),
+      createCreateEventTool(repository),
+      createDeleteEventTool(repository),
+    ];
 
     this._checkpointer = deps?.getCheckpointer
       ? deps.getCheckpointer()
@@ -109,8 +116,10 @@ export class DeepAgentsRuntime implements AgentRuntime {
           tools: tools as any,
           checkpointer: this._checkpointer,
           systemPrompt:
-            "你是一个日历语音助手。你可以通过 query_events 工具查询用户的日程。" +
+            "你是一个日历语音助手。你可以通过 query_events 工具查询用户的日程，" +
+            "通过 create_event 工具创建新日程，通过 delete_event 工具删除日程。" +
             "当用户询问日程安排、空闲时间或需要查看日历时，请先调用 query_events。" +
+            "创建和删除操作需要用户确认后才能执行。" +
             "用中文回复用户，保持回复简洁清晰。",
         });
   }
@@ -132,31 +141,47 @@ export class DeepAgentsRuntime implements AgentRuntime {
 
   async *stream(message: string, threadId: string, signal?: AbortSignal): AsyncIterable<AgentStreamEvent> {
     yield { type: "thread", threadId };
+    yield* this._runStream(
+      { messages: [new HumanMessage(message)] },
+      threadId,
+      signal,
+    );
+  }
 
-    // signal 在进入方法前已 abort，直接退出
+  async *resume(decision: ToolReviewDecision, threadId: string, signal?: AbortSignal): AsyncIterable<AgentStreamEvent> {
+    yield { type: "thread", threadId };
+    yield* this._runStream(
+      new Command({ resume: decision }),
+      threadId,
+      signal,
+    );
+  }
+
+  /** 统一的事件流驱动，支持普通输入和 Command resume。 */
+  private async *_runStream(
+    input: { messages: HumanMessage[] } | Command,
+    threadId: string,
+    signal?: AbortSignal,
+  ): AsyncIterable<AgentStreamEvent> {
     if (signal?.aborted) return;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let eventStream: any = undefined;
     let completed = false;
+    let eventsChanged = false;
 
     try {
-      eventStream = await this._agent.streamEvents(
-        { messages: [new HumanMessage(message)] },
-        {
-          configurable: { thread_id: threadId },
-          version: "v3",
-          ...(signal ? { signal } : {}),
-        },
-      );
+      eventStream = await this._agent.streamEvents(input, {
+        configurable: { thread_id: threadId },
+        version: "v3",
+        ...(signal ? { signal } : {}),
+      });
 
-      // eventStream 创建后 signal 已 abort：立即 abort 并退出
       if (signal?.aborted) {
         try { await eventStream.abort?.(new Error("Client disconnected")); } catch {}
         return;
       }
 
-      // 注册 onAbort：signal 触发时立即调用底层 abort 终止 Deep Agents run
       const onAbort = () => {
         try { eventStream?.abort?.(new Error("Client disconnected")); } catch {}
       };
@@ -210,12 +235,24 @@ export class DeepAgentsRuntime implements AgentRuntime {
             }
 
             if (toolEvent === "tool-finished") {
+              const tn = toolNames.get(callId) ?? "";
               yield {
                 type: "tool_finished",
                 callId,
-                tool: toolNames.get(callId) ?? "",
+                tool: tn,
                 result: data.output,
               };
+              // 检测写操作是否成功执行
+              if (tn === "create_event" || tn === "delete_event") {
+                try {
+                  const parsed = typeof data.output === "string"
+                    ? JSON.parse(data.output as string)
+                    : data.output;
+                  if (parsed?.action === "created" || parsed?.action === "deleted") {
+                    eventsChanged = true;
+                  }
+                } catch { /* ignore parse errors */ }
+              }
               continue;
             }
 
@@ -231,15 +268,42 @@ export class DeepAgentsRuntime implements AgentRuntime {
           }
         }
 
-        // 未 abort 时正常结束
+        // for-await 正常结束：检查 pending interrupt 再决定发送 done 还是 interrupt
         if (!signal?.aborted) {
+          const review = await this._readPendingInterrupt(threadId);
+          if (review) {
+            yield { type: "interrupt", review };
+            return;
+          }
           completed = true;
+          if (eventsChanged) {
+            yield { type: "events_changed" };
+          }
           yield { type: "done" };
         }
       } finally {
         signal?.removeEventListener("abort", onAbort);
       }
     } catch (err) {
+      // 捕获 interrupt() 抛出的 GraphInterrupt，提取 review payload
+      if (isGraphInterrupt(err)) {
+        const interrupts = (err as unknown as { interrupts?: Array<{ value: unknown }> }).interrupts;
+        if (interrupts && interrupts.length > 0) {
+          const value = interrupts[0].value;
+          if (value && typeof value === "object" && (value as Record<string, unknown>).kind === "tool_review") {
+            yield { type: "interrupt", review: value as ToolReviewInterrupt };
+            return;
+          }
+        }
+      }
+
+      // GraphInterrupt 可能被内部捕获：尝试从 checkpointer 读取
+      const review = await this._readPendingInterrupt(threadId);
+      if (review) {
+        yield { type: "interrupt", review };
+        return;
+      }
+
       if (!signal?.aborted) {
         yield {
           type: "error",
@@ -248,11 +312,29 @@ export class DeepAgentsRuntime implements AgentRuntime {
         };
       }
     } finally {
-      // 幂等兜底：未正常完成且有 eventStream 时确保底层 run 终止
       if (!completed && eventStream && typeof eventStream.abort === "function") {
         try { await eventStream.abort(new Error("Client disconnected")); } catch {}
       }
     }
+  }
+
+  /** 从 checkpointer 读取 pending interrupt，不存在时返回 null。 */
+  private async _readPendingInterrupt(threadId: string): Promise<ToolReviewInterrupt | null> {
+    try {
+      const config = { configurable: { thread_id: threadId } };
+      const tuple = await this._checkpointer.getTuple(config);
+      const channelValues = tuple?.checkpoint?.channel_values as Record<string, unknown> | undefined;
+      if (channelValues && "__interrupt__" in channelValues) {
+        const interrupts = channelValues.__interrupt__ as Array<{ value: unknown }>;
+        if (interrupts.length > 0) {
+          const value = interrupts[0].value;
+          if (value && typeof value === "object" && (value as Record<string, unknown>).kind === "tool_review") {
+            return value as ToolReviewInterrupt;
+          }
+        }
+      }
+    } catch { /* checkpointer read failed */ }
+    return null;
   }
 
   async deleteThread(threadId: string): Promise<void> {

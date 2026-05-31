@@ -46,6 +46,7 @@ export function VoiceCommandBar() {
     isListening,
     voiceSupported,
     toggleListening,
+    stopListening,
   } = useVoiceInput();
 
   const messageListRef = useRef<HTMLDivElement>(null);
@@ -58,12 +59,20 @@ export function VoiceCommandBar() {
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = inputText.trim();
-    if (!text || isSubmitting) return;
+    if (!text || isSubmitting || pendingAction || isExecutingPending) return;
 
     setInputText("");
     setCollapsed(false);
     await submitText(text);
   };
+
+  const hasBlocker = !!pendingAction || isExecutingPending;
+
+  useEffect(() => {
+    if (hasBlocker && isListening) {
+      stopListening();
+    }
+  }, [hasBlocker, isListening, stopListening]);
 
   const handleClearSession = () => {
     clearSession();
@@ -188,20 +197,24 @@ export function VoiceCommandBar() {
       <div className="pointer-events-auto flex w-full max-w-[760px] items-center justify-center gap-3">
         <button
           className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full border shadow-sm transition-all duration-200 ${
-            voiceSupported
-              ? isListening
-                ? "border-red-300 bg-red-100 text-red-500 animate-pulse"
-                : "vf-glass border-white/50 text-[#625f50] hover:scale-105 hover:bg-[#fff9e6]"
-              : "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
+            hasBlocker
+              ? "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
+              : voiceSupported
+                ? isListening
+                  ? "border-red-300 bg-red-100 text-red-500 animate-pulse"
+                  : "vf-glass border-white/50 text-[#625f50] hover:scale-105 hover:bg-[#fff9e6]"
+                : "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
           }`}
-          disabled={!voiceSupported}
-          onClick={toggleListening}
+          disabled={!voiceSupported || hasBlocker}
+          onClick={hasBlocker ? undefined : toggleListening}
           title={
-            voiceSupported
-              ? isListening
-                ? "停止录音"
-                : "语音输入"
-              : "浏览器不支持语音识别"
+            hasBlocker
+              ? "请先确认当前操作"
+              : voiceSupported
+                ? isListening
+                  ? "停止录音"
+                  : "语音输入"
+                : "浏览器不支持语音识别"
           }
         >
           {voiceSupported ? (
@@ -218,14 +231,14 @@ export function VoiceCommandBar() {
           <input
             className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
             onChange={(e) => setInputText(e.target.value)}
-            placeholder={isSubmitting ? "处理中..." : "输入指令..."}
+            placeholder={isSubmitting ? "处理中..." : hasBlocker ? "请先确认当前操作" : "输入指令..."}
             type="text"
             value={inputText}
-            disabled={isSubmitting}
+            disabled={isSubmitting || hasBlocker}
           />
           <button
             className="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#fff9e6] text-[#625f50] transition-colors hover:bg-[#e8e2d0] disabled:cursor-not-allowed disabled:opacity-40"
-            disabled={!inputText.trim() || isSubmitting}
+            disabled={!inputText.trim() || isSubmitting || hasBlocker}
             type="submit"
           >
             <Send className="h-3.5 w-3.5" />
