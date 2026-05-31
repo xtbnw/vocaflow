@@ -1,8 +1,24 @@
 /**
  * Pure controller for voice auto-submit with debounce.
  *
- * Separated from React hooks so the debounce / round-race logic
+ * Separated from React hooks so the debounce / session-race logic
  * can be tested deterministically without DOM or ASR fixtures.
+ *
+ * ## Voice session model
+ *
+ * A "voice session" begins when the user explicitly turns on the mic and ends
+ * only when the user explicitly turns it off. Within a single session, the
+ * controller automatically starts a new round after each debounced submit so
+ * that consecutive speech segments are submitted without the user re-tapping
+ * the mic button.
+ *
+ * - startSession() → returns a sessionToken
+ * - Each call to handleFinal(text, sessionToken) feeds the current round
+ * - When the debounce timer fires the accumulated text is submitted and a
+ *   new round starts automatically within the same session
+ * - stopSession() invalidates the session; late finals with stale tokens are
+ *   silently ignored
+ * - Manual close via stopSession() prevents any pending or future submission
  */
 
 export interface VoiceAutoSubmitOptions {
@@ -13,12 +29,12 @@ export interface VoiceAutoSubmitOptions {
 }
 
 export interface VoiceAutoSubmitController {
-  /** Start a new listening round. Resets accumulated text and timer. Returns new roundId. */
-  startRound(): number;
-  /** Process a final result for the given round. Restarts debounce timer. */
-  handleFinal(text: string, roundId: number): void;
-  /** Stop current round. Clears timer. Stale round IDs are silently ignored. */
-  stopRound(): void;
+  /** Start a new voice session. Returns a session token. */
+  startSession(): number;
+  /** Process a final result for the given session. Restarts debounce timer. */
+  handleFinal(text: string, sessionToken: number): void;
+  /** Stop current session. Clears timer. Ignores all future finals for this session. */
+  stopSession(): void;
   /** Get current accumulated text. */
   getText(): string;
   /** Clean up resources. Safe to call multiple times. */
@@ -31,6 +47,7 @@ export function createVoiceAutoSubmitController(
   const debounceMs = options.debounceMs ?? 800;
   const onSubmit = options.onSubmit;
 
+  let sessionToken = 0;
   let roundId = 0;
   let accumulated: string[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -42,22 +59,15 @@ export function createVoiceAutoSubmitController(
     }
   }
 
-  function startRound(): number {
-    clearTimer();
-    accumulated = [];
-    roundId += 1;
-    return roundId;
-  }
-
-  function handleFinal(text: string, rId: number): void {
-    if (rId !== roundId) return;
-    accumulated.push(text);
+  function scheduleSubmit(token: number) {
     clearTimer();
     timer = setTimeout(() => {
       timer = null;
+      // Ignore if session was stopped while timer was pending
+      if (sessionToken !== token) return;
       const aggregated = accumulated.join(" ").trim();
-      // Invalidate current round BEFORE calling onSubmit so this round can
-      // never submit again, even if a late final arrives with the same roundId.
+      // Start new round before onSubmit so handleFinal after submit
+      // feeds the next round within the same session
       accumulated = [];
       roundId += 1;
       if (aggregated) {
@@ -66,10 +76,25 @@ export function createVoiceAutoSubmitController(
     }, debounceMs);
   }
 
-  function stopRound(): void {
+  function startSession(): number {
     clearTimer();
     accumulated = [];
-    roundId += 1;
+    roundId = 0;
+    sessionToken += 1;
+    return sessionToken;
+  }
+
+  function handleFinal(text: string, token: number): void {
+    if (token !== sessionToken) return;
+    accumulated.push(text);
+    scheduleSubmit(token);
+  }
+
+  function stopSession(): void {
+    clearTimer();
+    accumulated = [];
+    roundId = 0;
+    sessionToken += 1;
   }
 
   function getText(): string {
@@ -81,5 +106,5 @@ export function createVoiceAutoSubmitController(
     accumulated = [];
   }
 
-  return { startRound, handleFinal, stopRound, getText, dispose };
+  return { startSession, handleFinal, stopSession, getText, dispose };
 }

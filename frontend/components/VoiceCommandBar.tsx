@@ -15,18 +15,21 @@ import {
   XCircle,
   AlertTriangle,
   ChevronRight,
+  Pencil,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionMessage } from "@/backend/domain/sessionTypes";
-import { useAgentSession, isCalendarTool, shouldStopVoice, type ToolActivity } from "@/frontend/hooks/useAgentSession";
+import { useAgentSession, isCalendarTool, type ToolActivity } from "@/frontend/hooks/useAgentSession";
 import { useVoiceInput } from "@/frontend/hooks/useVoiceInput";
 import { useCalendarEventsRefresh } from "@/frontend/hooks/useCalendarEvents";
 import { VADController } from "@/frontend/infrastructure/vad/vadController";
-import { executeBargeIn } from "@/frontend/infrastructure/vad/bargeIn";
+import { executeBargeIn, cancelCurrentReply } from "@/frontend/infrastructure/vad/bargeIn";
 import { ActionPreviewPanel } from "./ActionPreviewPanel";
 
 export function VoiceCommandBar() {
   const [collapsed, setCollapsed] = useState(true);
+  const [textInputOpen, setTextInputOpen] = useState(false);
   const triggerRefresh = useCalendarEventsRefresh();
 
   const {
@@ -48,26 +51,24 @@ export function VoiceCommandBar() {
     cancelTts,
   } = useAgentSession(triggerRefresh);
 
-  // Refs for functions declared later (useVoiceInput / useAgentSession) so
-  // handleVoiceAutoSubmit can be defined before them without circular imports.
+  // Refs for functions declared later so handleVoiceAutoSubmit can be defined
+  // before them without circular imports.
   const submitRef = useRef(submitText);
   submitRef.current = submitText;
-  const stopRef = useRef<() => void>(() => {});
   const clearInputRef = useRef<() => void>(() => {});
   const expandRef = useRef<() => void>(() => {});
+  const isListeningRef = useRef(false);
 
-  // Ref-wrapped blocker snapshot so the auto-submit callback (captured once
-  // in useVoiceInput) can read live blocker state without stale closures.
+  // Ref-wrapped blocker snapshot so the auto-submit callback can read live
+  // blocker state without stale closures.
   const blockerRef = useRef({ isSubmitting, pendingAction, isExecutingPending });
   blockerRef.current = { isSubmitting, pendingAction, isExecutingPending };
 
   const handleVoiceAutoSubmit = useCallback((text: string) => {
-    // Always stop ASR and invalidate the current round first — the controller
-    // already invalidated the round before calling us, but stopListening
-    // ensures the mic is off and the UI state is consistent.
-    stopRef.current();
     const { isSubmitting: submitting, pendingAction: pending, isExecutingPending: executing } = blockerRef.current;
     if (submitting || pending || executing) {
+      // Pause auto-submit during blockers but keep voice mode active.
+      // The text is dropped — user can speak again after blocker resolves.
       return;
     }
     clearInputRef.current();
@@ -86,7 +87,7 @@ export function VoiceCommandBar() {
   } = useVoiceInput({ onAutoSubmit: handleVoiceAutoSubmit });
 
   // Wire up late-bound refs
-  stopRef.current = stopListening;
+  isListeningRef.current = isListening;
   clearInputRef.current = () => setInputText("");
   expandRef.current = () => setCollapsed(false);
 
@@ -106,13 +107,24 @@ export function VoiceCommandBar() {
 
   // -- barge-in handler (shared by VAD trigger and manual mic click) --
   const performBargeIn = useCallback(() => {
-    if (!voiceSupported) return; // defensive: ASR unavailable, don't interrupt TTS/SSE
-    executeBargeIn({
-      cancelTts,
-      abortSse: abortAgentStream,
-      stopVad: () => vadRef.current?.stop(),
-      startAsr: () => startListening(),
-    });
+    if (!voiceSupported) return;
+    if (isListeningRef.current) {
+      // ASR is already on — cancel reply without restarting ASR to preserve
+      // current in-progress transcription.
+      cancelCurrentReply({
+        cancelTts,
+        abortSse: abortAgentStream,
+        stopVad: () => vadRef.current?.stop(),
+      });
+    } else {
+      // ASR is off — cancel reply and ensure ASR starts.
+      executeBargeIn({
+        cancelTts,
+        abortSse: abortAgentStream,
+        stopVad: () => vadRef.current?.stop(),
+        ensureAsr: () => startListening(),
+      });
+    }
   }, [cancelTts, abortAgentStream, startListening, voiceSupported]);
 
   // -- VAD lifecycle --
@@ -155,6 +167,7 @@ export function VoiceCommandBar() {
 
     setInputText("");
     setCollapsed(false);
+    setTextInputOpen(false);
     await submitText(text);
   };
 
@@ -165,29 +178,31 @@ export function VoiceCommandBar() {
   };
 
   const handleMicClick = async () => {
-    if (hasBlocker) return;
+    const blocked = !!pendingAction || isExecutingPending;
 
-    // 正在播报时点击麦克风 → 立即打断并开始新 ASR（不受自动打断开关影响）
+    // TTS playing — barge in (mic click always interrupts)
     if (isTtsPlaying) {
       performBargeIn();
       return;
     }
 
-    // 在用户手势链路中恢复 AudioContext
+    // Resume AudioContext in user gesture
     if (voiceSupported) {
-      try { await resumeAudioContext(); } catch { /* 浏览器不支持 AudioContext 时忽略 */ }
+      try { await resumeAudioContext(); } catch {}
     }
-    toggleListening();
+
+    // If voice mode is on, turn it off (explicit user action)
+    if (isListening) {
+      stopListening();
+      return;
+    }
+
+    // If voice mode is off, turn it on (unless blocked by pending action)
+    if (blocked) return;
+    startListening();
   };
 
   const hasBlocker = !!pendingAction || isExecutingPending;
-
-  useEffect(() => {
-    if (shouldStopVoice(hasBlocker, isListening)) {
-      stopListening();
-    }
-  }, [hasBlocker, isListening, stopListening]);
-
   const hasMessages = messages.length > 0;
   const hasToolActivities = toolActivities.length > 0;
   const latestMessage = hasMessages ? messages[messages.length - 1] : null;
@@ -195,6 +210,7 @@ export function VoiceCommandBar() {
 
   return (
     <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-50 flex flex-col items-center gap-2 px-4 pb-4">
+      {/* Message list — expandable above the voice bar */}
       {hasMessages && !collapsed && (
         <div
           className={`pointer-events-auto mb-2 flex w-full flex-col ${
@@ -310,63 +326,10 @@ export function VoiceCommandBar() {
         </div>
       )}
 
+      {/* ================================================================ */}
+      {/* Voice Bar Capsule — prototype-inspired design                    */}
+      {/* ================================================================ */}
       <div className="pointer-events-auto flex w-full max-w-[760px] flex-col items-center gap-2">
-        <div className="flex w-full items-center justify-center gap-3">
-          <button
-            className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full border shadow-sm transition-all duration-200 ${
-              hasBlocker
-                ? "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
-                : voiceSupported
-                  ? isListening
-                    ? "border-red-300 bg-red-100 text-red-500 animate-pulse"
-                    : "vf-glass border-white/50 text-[#625f50] hover:scale-105 hover:bg-[#fff9e6]"
-                  : "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
-            }`}
-            disabled={!voiceSupported || hasBlocker}
-            onClick={hasBlocker ? undefined : handleMicClick}
-            title={
-              hasBlocker
-                ? "请先确认当前操作"
-                : voiceSupported
-                  ? isTtsPlaying
-                    ? "打断播报"
-                    : isListening
-                      ? "停止录音"
-                      : "语音输入"
-                  : "浏览器不支持语音识别"
-            }
-          >
-            {isTtsPlaying ? (
-              <Volume2 className="h-5 w-5 text-[#2e7d32] animate-pulse" />
-            ) : voiceSupported ? (
-              <Mic className="h-5 w-5" />
-            ) : (
-              <MicOff className="h-5 w-5" />
-            )}
-          </button>
-
-          <form
-            className="vf-glass flex h-12 min-w-0 flex-1 items-center rounded-full border border-white/30 px-5 shadow-sm transition-colors focus-within:border-[#625f50]/50"
-            onSubmit={handleSubmit}
-          >
-            <input
-              className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder={isSubmitting ? "处理中..." : hasBlocker ? "请先确认当前操作" : "输入指令..."}
-              type="text"
-              value={inputText}
-              disabled={isSubmitting || hasBlocker}
-            />
-            <button
-              className="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#fff9e6] text-[#625f50] transition-colors hover:bg-[#e8e2d0] disabled:cursor-not-allowed disabled:opacity-40"
-              disabled={!inputText.trim() || isSubmitting || hasBlocker}
-              type="submit"
-            >
-              <Send className="h-3.5 w-3.5" />
-            </button>
-          </form>
-        </div>
-
         {/* Auto-barge-in toggle */}
         <label className="pointer-events-auto flex items-center gap-2 text-xs text-[#49473f]/70 cursor-pointer select-none">
           <span>自动打断</span>
@@ -395,6 +358,143 @@ export function VoiceCommandBar() {
             <span className="text-[#ba1a1a]/70">（仅手动模式）</span>
           )}
         </label>
+
+        {/* Text input — secondary, only visible when user clicks pencil */}
+        {textInputOpen ? (
+          <form
+            className="vf-glass flex h-12 w-full max-w-[400px] items-center rounded-full border border-white/30 px-5 shadow-sm transition-colors focus-within:border-[#625f50]/50"
+            onSubmit={handleSubmit}
+          >
+            <input
+              className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
+              onChange={(e) => setInputText(e.target.value)}
+              placeholder={isSubmitting ? "处理中..." : hasBlocker ? "请先确认当前操作" : "输入指令..."}
+              type="text"
+              value={inputText}
+              disabled={isSubmitting || hasBlocker}
+              autoFocus
+            />
+            <button
+              className="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#fff9e6] text-[#625f50] transition-colors hover:bg-[#e8e2d0] disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={!inputText.trim() || isSubmitting || hasBlocker}
+              type="submit"
+              aria-label="发送文字指令"
+            >
+              <Send className="h-3.5 w-3.5" />
+            </button>
+            <button
+              className="ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[#49473f]/50 transition-colors hover:bg-[#e5e2e1]/30"
+              onClick={() => { setTextInputOpen(false); setInputText(""); }}
+              type="button"
+              aria-label="关闭文字输入"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </form>
+        ) : (
+          /* Text input toggle button — secondary, compact */
+          <button
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full vf-glass border border-white/30 text-[#625f50]/60 transition-colors hover:text-[#625f50] hover:bg-[#fff9e6]/50"
+            onClick={() => setTextInputOpen(true)}
+            disabled={hasBlocker}
+            aria-label="打开文字输入"
+            title="文字输入"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+          </button>
+        )}
+
+        {/* Main voice capsule */}
+        <div
+          className={`vf-glass vf-voice-bar ambient-glow flex h-16 items-center rounded-full p-1 overflow-hidden ${
+            isListening ? "expanded" : ""
+          }`}
+        >
+          {/* Mic button */}
+          <button
+            className={`shrink-0 w-14 h-14 rounded-full flex items-center justify-center shadow-sm border border-white/50 transition-all duration-300 hover:scale-105 z-10 ${
+              !voiceSupported
+                ? "bg-[#e5e2e1] cursor-not-allowed text-[#49473f]/30"
+                : hasBlocker
+                  ? "bg-[#fff9e6] cursor-not-allowed text-[#625f50]/40"
+                  : isListening
+                    ? "bg-[#ffdad6] text-[#93000a]"
+                    : "bg-[#fff9e6] text-[#625f50] pulse-ring"
+            }`}
+            disabled={!voiceSupported || hasBlocker}
+            onClick={hasBlocker ? undefined : handleMicClick}
+            aria-label={
+              !voiceSupported
+                ? "浏览器不支持语音识别"
+                : hasBlocker
+                  ? "请先确认当前操作"
+                  : isTtsPlaying
+                    ? "打断播报"
+                    : isListening
+                      ? "关闭语音模式"
+                      : "开启语音模式"
+            }
+            title={
+              !voiceSupported
+                ? "浏览器不支持语音识别"
+                : hasBlocker
+                  ? "请先确认当前操作"
+                  : isTtsPlaying
+                    ? "打断播报"
+                    : isListening
+                      ? "关闭语音模式"
+                      : "开启语音模式"
+            }
+          >
+            {isTtsPlaying ? (
+              <Volume2 className="h-6 w-6 text-[#2e7d32]" />
+            ) : voiceSupported ? (
+              <Mic className="h-6 w-6" />
+            ) : (
+              <MicOff className="h-6 w-6" />
+            )}
+          </button>
+
+          {/* Expanded content: waveform + transcription + close */}
+          {isListening && (
+            <div className="flex-1 flex items-center justify-between pl-4 h-full min-w-0">
+              {/* Animated waveform bars */}
+              <div className="flex items-end gap-1 h-6 w-12 shrink-0">
+                <div className="w-1 bg-[#625f50] rounded-full wave-bar h-full" />
+                <div className="w-1 bg-[#625f50] rounded-full wave-bar h-2/3" />
+                <div className="w-1 bg-[#625f50] rounded-full wave-bar h-full" />
+                <div className="w-1 bg-[#625f50] rounded-full wave-bar h-1/2" />
+                <div className="w-1 bg-[#625f50] rounded-full wave-bar h-4/5" />
+                <div className="w-1 bg-[#625f50] rounded-full wave-bar h-1/3" />
+              </div>
+
+              {/* Scrolling transcription or placeholder */}
+              <div className="flex-1 overflow-hidden transcription-scroll ml-3 h-full flex items-center relative min-w-0">
+                <div className="absolute inset-0 flex items-center">
+                  {inputText ? (
+                    <span className="text-sm text-[#1c1b1b] whitespace-nowrap animate-scroll">
+                      {inputText}
+                    </span>
+                  ) : (
+                    <span className="text-sm text-[#49473f]/40 whitespace-nowrap">
+                      正在聆听...
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Close button */}
+              <button
+                className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center hover:bg-[#e5e2e1]/50 transition-colors text-[#5f5f58] ml-1"
+                onClick={(e) => { e.stopPropagation(); stopListening(); }}
+                aria-label="关闭语音模式"
+                title="关闭语音模式"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

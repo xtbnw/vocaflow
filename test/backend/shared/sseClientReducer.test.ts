@@ -498,22 +498,22 @@ test("submit is allowed when no blockers and text present", () => {
 });
 
 // ---------------------------------------------------------------------------
-// shouldStopVoice — voice stop boundary contract
+// shouldStopVoice — voice mode is now user-controlled
 // ---------------------------------------------------------------------------
 
-test("shouldStopVoice returns true when blocker appears during listening", () => {
-  // pendingAction 出现 + 正在录音 → 应停止录音
-  assert.equal(shouldStopVoice(true, true), true);
-  // isExecutingPending + 正在录音 → 应停止录音
-  assert.equal(shouldStopVoice(true, true), true);
+test("shouldStopVoice never closes user-controlled voice mode", () => {
+  // pendingAction + listening → must NOT stop (voice mode is user-controlled)
+  assert.equal(shouldStopVoice(true, true), false);
+  // isExecutingPending + listening → must NOT stop
+  assert.equal(shouldStopVoice(true, true), false);
 });
 
-test("shouldStopVoice returns false when no blocker or not listening", () => {
-  // 无 blocker，正在录音 → 不应停止
+test("shouldStopVoice returns false regardless of state", () => {
+  // No blocker, listening → don't stop
   assert.equal(shouldStopVoice(false, true), false);
-  // 有 blocker，但未在录音 → 无需停止
+  // Blocker, not listening → don't stop
   assert.equal(shouldStopVoice(true, false), false);
-  // 无 blocker 且未在录音 → 无需停止
+  // Neither → don't stop
   assert.equal(shouldStopVoice(false, false), false);
 });
 

@@ -36,9 +36,15 @@ export function isCalendarTool(tool: string): boolean {
   return CALENDAR_TOOLS.has(tool);
 }
 
-/** 当 blocker 出现且正在录音时应停止语音识别。 */
-export function shouldStopVoice(hasBlocker: boolean, isListening: boolean): boolean {
-  return hasBlocker && isListening;
+/**
+ * 语音模式现在是用户显式控制的持久状态。pendingAction 或 isExecutingPending
+ * 等中间状态不应自动关闭用户已开启的语音模式。自动提交暂停由 VoiceCommandBar
+ * 的 blockerRef 检查处理。只有用户显式点击麦克风按钮或发生致命 ASR 错误时才会关闭。
+ */
+export function shouldStopVoice(_hasBlocker: boolean, _isListening: boolean): boolean {
+  // Voice mode is now user-controlled. Internal states like pendingAction
+  // must not close it. Auto-submit pausing is handled at the command-bar level.
+  return false;
 }
 
 // ---------------------------------------------------------------------------

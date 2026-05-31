@@ -28,6 +28,21 @@ export interface VoiceInputState {
 }
 
 // ---------------------------------------------------------------------------
+// ASR error classification
+// ---------------------------------------------------------------------------
+
+/** Returns true for errors that should close the persistent voice session. */
+export function isFatalASRError(message: string): boolean {
+  const fatal = [
+    "麦克风权限未授权",
+    "未找到麦克风设备",
+    "语音识别服务不可用",
+    "当前语言不支持",
+  ];
+  return fatal.some((f) => message.includes(f));
+}
+
+// ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
 
@@ -52,7 +67,7 @@ export function useVoiceInput(options?: UseVoiceInputOptions): VoiceInputState {
   onAutoSubmitRef.current = options?.onAutoSubmit;
 
   const controllerRef = useRef<VoiceAutoSubmitController | null>(null);
-  const roundIdRef = useRef(0);
+  const sessionTokenRef = useRef(0);
   const committedRef = useRef("");
 
   // ---------- helpers ----------
@@ -81,7 +96,7 @@ export function useVoiceInput(options?: UseVoiceInputOptions): VoiceInputState {
 
     const ctrl = ensureController();
     if (ctrl) {
-      roundIdRef.current = ctrl.startRound();
+      sessionTokenRef.current = ctrl.startSession();
     }
 
     asr.start();
@@ -90,7 +105,10 @@ export function useVoiceInput(options?: UseVoiceInputOptions): VoiceInputState {
 
   const stopListening = useCallback(() => {
     asrRef.current?.stop();
-    controllerRef.current?.stopRound();
+    controllerRef.current?.stopSession();
+    sessionTokenRef.current = 0;
+    committedRef.current = "";
+    setInputText("");
     setIsListening(false);
   }, []);
 
@@ -120,16 +138,25 @@ export function useVoiceInput(options?: UseVoiceInputOptions): VoiceInputState {
       setInputText(committedRef.current);
 
       const ctrl = controllerRef.current;
-      if (ctrl) {
-        ctrl.handleFinal(text, roundIdRef.current);
+      const token = sessionTokenRef.current;
+      if (ctrl && token > 0) {
+        ctrl.handleFinal(text, token);
       }
     };
 
     asr.onError = (message) => {
       console.error("ASR error:", message);
-      asr.stop(); // prevent WebSpeechASRProvider onend auto-restart
-      controllerRef.current?.stopRound();
-      setIsListening(false);
+      if (isFatalASRError(message)) {
+        // Fatal errors close the persistent voice session
+        asr.stop();
+        controllerRef.current?.stopSession();
+        sessionTokenRef.current = 0;
+        committedRef.current = "";
+        setInputText("");
+        setIsListening(false);
+      }
+      // Recoverable errors (no-speech, aborted) — let the ASR provider
+      // auto-restart via its onend handler; do NOT close the voice session.
     };
 
     return () => {

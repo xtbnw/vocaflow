@@ -110,8 +110,39 @@ test("buildSystemPrompt allows clarification before create_event", () => {
   assert.match(prompt, /允许通过多轮对话逐步澄清/);
   assert.match(prompt, /仅当标题、精确开始时间和结束时间都足够明确时调用 create_event/);
   assert.match(prompt, /不得因为用户表达了创建意图就立即调用 create_event/);
-  assert.match(prompt, /必须实际调用 query_events/);
+  assert.match(prompt, /必须立即在当前轮调用 query_events/);
   assert.doesNotMatch(prompt, /必须直接调用 create_event 工具/);
+});
+
+test("buildSystemPrompt forbids query promises without actual tool calls", () => {
+  const prompt = buildSystemPrompt();
+
+  // Must contain the forbidden-pattern rule
+  assert.match(prompt, /禁止只播报查询承诺/);
+  assert.match(prompt, /我先查询一下/);
+  assert.match(prompt, /必须立即在当前轮调用 query_events/);
+});
+
+test("buildSystemPrompt mandates immediate query for free-time search in explicit range", () => {
+  const prompt = buildSystemPrompt();
+
+  assert.match(prompt, /明确范围内找空闲时间必须立即查询/);
+  assert.match(prompt, /随便找个时间/);
+  assert.match(prompt, /禁止跳过 query_events 直接建议时间/);
+});
+
+test("buildSystemPrompt labels optional fields and forbids chasing them", () => {
+  const prompt = buildSystemPrompt();
+
+  assert.match(prompt, /可选字段不要追问/);
+  assert.match(prompt, /面试/);
+  assert.match(prompt, /不追问公司、地点、备注/);
+});
+
+test("createQueryEventsTool description forbids query promises", () => {
+  const t = createQueryEventsTool(stubRepo());
+  assert.match(t.description, /不要先回复.*我先查询一下/);
+  assert.match(t.description, /工具调用不需要提前向用户播报/);
 });
 
 test("DeepAgentsRuntime implements AgentRuntime interface", () => {
