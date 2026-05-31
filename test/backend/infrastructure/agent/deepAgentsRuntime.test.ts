@@ -9,7 +9,9 @@ import {
   DeepAgentsRuntime,
   buildSystemPrompt,
   createQueryEventsTool,
+  didCalendarWriteChange,
   extractInterruptPayload,
+  resolveFinishedToolName,
   DEFAULT_LLM_CONFIG,
 } from "../../../../backend/infrastructure/agent/deepAgentsRuntime";
 import type { CalendarRepository } from "../../../../backend/domain/calendarRepository";
@@ -110,8 +112,39 @@ test("buildSystemPrompt allows clarification before create_event", () => {
   assert.match(prompt, /允许通过多轮对话逐步澄清/);
   assert.match(prompt, /仅当标题、精确开始时间和结束时间都足够明确时调用 create_event/);
   assert.match(prompt, /不得因为用户表达了创建意图就立即调用 create_event/);
-  assert.match(prompt, /必须实际调用 query_events/);
+  assert.match(prompt, /必须立即在当前轮调用 query_events/);
   assert.doesNotMatch(prompt, /必须直接调用 create_event 工具/);
+});
+
+test("buildSystemPrompt forbids query promises without actual tool calls", () => {
+  const prompt = buildSystemPrompt();
+
+  // Must contain the forbidden-pattern rule
+  assert.match(prompt, /禁止只播报查询承诺/);
+  assert.match(prompt, /我先查询一下/);
+  assert.match(prompt, /必须立即在当前轮调用 query_events/);
+});
+
+test("buildSystemPrompt mandates immediate query for free-time search in explicit range", () => {
+  const prompt = buildSystemPrompt();
+
+  assert.match(prompt, /明确范围内找空闲时间必须立即查询/);
+  assert.match(prompt, /随便找个时间/);
+  assert.match(prompt, /禁止跳过 query_events 直接建议时间/);
+});
+
+test("buildSystemPrompt labels optional fields and forbids chasing them", () => {
+  const prompt = buildSystemPrompt();
+
+  assert.match(prompt, /可选字段不要追问/);
+  assert.match(prompt, /面试/);
+  assert.match(prompt, /不追问公司、地点、备注/);
+});
+
+test("createQueryEventsTool description forbids query promises", () => {
+  const t = createQueryEventsTool(stubRepo());
+  assert.match(t.description, /不要先回复.*我先查询一下/);
+  assert.match(t.description, /工具调用不需要提前向用户播报/);
 });
 
 test("DeepAgentsRuntime implements AgentRuntime interface", () => {
@@ -914,6 +947,64 @@ test("stream emits events_changed after successful create_event tool_finished", 
   assert.ok(ec, "Expected events_changed event after successful create_event");
   const doneEv = events.find((e) => e.type === "done");
   assert.ok(doneEv, "Expected done event");
+});
+
+test("resume emits events_changed immediately when tool-finished has no matching tool-started", async () => {
+  const repo = stubRepo();
+  const stubAgent = {
+    streamEvents: async function* () {
+      yield {
+        method: "tools",
+        params: {
+          data: {
+            event: "tool-finished",
+            tool_call_id: "call-resumed",
+            output: JSON.stringify({ action: "created", event: { title: "审批后创建" } }),
+          },
+        },
+      };
+      yield {
+        method: "messages",
+        params: {
+          data: {
+            event: "message-start",
+            id: "message-after-write",
+          },
+        },
+      };
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.resume(
+    { decision: "approve" },
+    "thread-resumed-write",
+  )) {
+    events.push(ev);
+  }
+
+  assert.deepEqual(events.map((event) => event.type), [
+    "thread",
+    "tool_finished",
+    "events_changed",
+    "done",
+  ]);
+  assert.equal(events[1].tool, "create_event");
+});
+
+test("finished calendar write detection recovers missing tool name from domain result", () => {
+  const output = JSON.stringify({ action: "deleted", deleted: 1 });
+  const toolName = resolveFinishedToolName("", output);
+  assert.equal(toolName, "delete_event");
+  assert.equal(didCalendarWriteChange(toolName, output), true);
+  assert.equal(didCalendarWriteChange("query_events", output), false);
+  assert.equal(didCalendarWriteChange("create_event", JSON.stringify({ action: "rejected" })), false);
 });
 
 test("stream does not emit events_changed after rejected write", async () => {

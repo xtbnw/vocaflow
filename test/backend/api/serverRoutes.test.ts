@@ -80,6 +80,7 @@ test("GET /api/events returns repository.list() result", async () => {
   const { GET } = await import("../../../app/api/events/route");
   const res = await GET();
   assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "no-store");
   const body = await res.json();
   assert.deepEqual(body.events, mockEvents);
 });

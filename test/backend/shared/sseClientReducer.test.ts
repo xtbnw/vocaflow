@@ -6,7 +6,9 @@ import {
   initialStreamState,
   isCalendarTool,
   buildDisplayMessages,
+  forwardStreamEventToTts,
   shouldStopVoice,
+  shouldSpeakResume,
   VoiceApproval,
   type StreamState,
   type ToolActivity,
@@ -498,22 +500,22 @@ test("submit is allowed when no blockers and text present", () => {
 });
 
 // ---------------------------------------------------------------------------
-// shouldStopVoice — voice stop boundary contract
+// shouldStopVoice — voice mode is now user-controlled
 // ---------------------------------------------------------------------------
 
-test("shouldStopVoice returns true when blocker appears during listening", () => {
-  // pendingAction 出现 + 正在录音 → 应停止录音
-  assert.equal(shouldStopVoice(true, true), true);
-  // isExecutingPending + 正在录音 → 应停止录音
-  assert.equal(shouldStopVoice(true, true), true);
+test("shouldStopVoice never closes user-controlled voice mode", () => {
+  // pendingAction + listening → must NOT stop (voice mode is user-controlled)
+  assert.equal(shouldStopVoice(true, true), false);
+  // isExecutingPending + listening → must NOT stop
+  assert.equal(shouldStopVoice(true, true), false);
 });
 
-test("shouldStopVoice returns false when no blocker or not listening", () => {
-  // 无 blocker，正在录音 → 不应停止
+test("shouldStopVoice returns false regardless of state", () => {
+  // No blocker, listening → don't stop
   assert.equal(shouldStopVoice(false, true), false);
-  // 有 blocker，但未在录音 → 无需停止
+  // Blocker, not listening → don't stop
   assert.equal(shouldStopVoice(true, false), false);
-  // 无 blocker 且未在录音 → 无需停止
+  // Neither → don't stop
   assert.equal(shouldStopVoice(false, false), false);
 });
 
@@ -610,4 +612,36 @@ test("VoiceApproval: startTurn resets both voiceTurn and prompted", () => {
   assert.equal(s.prompted, false);
   const r2 = VoiceApproval.tryPrompt(s);
   assert.equal(r2.play, true);
+});
+
+// ---------------------------------------------------------------------------
+// Resume TTS forwarding — approve / reject share this policy
+// ---------------------------------------------------------------------------
+
+test("shouldSpeakResume keeps voice-origin approvals audible", () => {
+  assert.equal(shouldSpeakResume(VoiceApproval.startTurn(true)), true);
+  assert.equal(shouldSpeakResume(VoiceApproval.startTurn(false)), false);
+});
+
+test("forwardStreamEventToTts forwards resumed deltas and cancels on stream error", () => {
+  const appended: string[] = [];
+  let canceled = 0;
+  const tts = {
+    appendText(text: string) { appended.push(text); },
+    cancel() { canceled++; },
+  };
+
+  forwardStreamEventToTts(tts, { type: "message_delta", messageId: "a1", text: "审批已通过" });
+  forwardStreamEventToTts(tts, { type: "tool_started", callId: "c1", tool: "create_event", arguments: {} });
+  forwardStreamEventToTts(tts, { type: "error", code: "NETWORK_ERROR", message: "连接中断" });
+
+  assert.deepEqual(appended, ["审批已通过"]);
+  assert.equal(canceled, 1);
+});
+
+test("forwardStreamEventToTts is silent without a voice TTS sink", () => {
+  assert.doesNotThrow(() => {
+    forwardStreamEventToTts(null, { type: "message_delta", messageId: "a1", text: "仅显示文字" });
+    forwardStreamEventToTts(null, { type: "error", code: "NETWORK_ERROR", message: "连接中断" });
+  });
 });

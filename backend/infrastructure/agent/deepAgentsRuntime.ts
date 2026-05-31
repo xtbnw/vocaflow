@@ -52,13 +52,44 @@ export function createQueryEventsTool(repository: CalendarRepository) {
       name: "query_events",
       description:
         "查询指定时间范围内的日程事件。" +
-        "当用户询问某段时间有什么安排、是否空闲、日程列表等需要查看日历信息时调用此工具。" +
+        "当用户询问某段时间有什么安排、是否空闲、日程列表、查找可用时间、删除匹配日程等需要查看日历信息时，" +
+        "必须立即在当前轮调用此工具，不要先回复'我先查询一下'后结束本轮。" +
         "rangeStartAt 和 rangeEndAt 为 ISO 8601 格式的日期时间字符串（含时区），" +
         "表示查询时间区间的起止。" +
-        "keyword 为可选关键词，用于在日程标题和备注中进行文本过滤。",
+        "keyword 为可选关键词，用于在日程标题和备注中进行文本过滤。" +
+        "注意：工具调用不需要提前向用户播报，直接调用即可。",
       schema: QueryEventsArgsSchema,
     },
   );
+}
+
+function parseToolOutput(output: unknown): Record<string, unknown> | null {
+  try {
+    const parsed = typeof output === "string" ? JSON.parse(output) : output;
+    return parsed && typeof parsed === "object"
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resume 流可能只包含 tool-finished，没有同一流内的 tool-started。
+ * 此时使用领域结果 action 恢复工具名，确保成功写入立即通知前端刷新。
+ */
+export function resolveFinishedToolName(toolName: string, output: unknown): string {
+  if (toolName) return toolName;
+  const action = parseToolOutput(output)?.action;
+  if (action === "created") return "create_event";
+  if (action === "deleted") return "delete_event";
+  return "";
+}
+
+export function didCalendarWriteChange(toolName: string, output: unknown): boolean {
+  if (toolName !== "create_event" && toolName !== "delete_event") return false;
+  const action = parseToolOutput(output)?.action;
+  return action === "created" || action === "deleted";
 }
 
 function defaultCheckpointerPath(): string {
@@ -109,15 +140,40 @@ export function buildSystemPrompt(): string {
 请使用中文回复，保持简洁清晰。只输出适合直接展示和语音播报的简单纯文本：
 - 不要使用 Markdown，不要使用星号、井号、反引号、下划线或表格。
 - 不要使用项目符号列表。需要列举时，使用简短的自然语言句子。
-- 日期和时间使用适合朗读的口语表达。例如：“6月2日，也就是周二，上午的10点到11点有场前端开发面试，其余时间都没有安排。”
-- 查询一周安排时，不要先复述完整的日期范围，不要输出“安排如下”。直接说明有日程的日期和空闲情况。
+- 日期和时间使用适合朗读的口语表达。例如：”6月2日，也就是周二，上午的10点到11点有场前端开发面试，其余时间都没有安排。”
+- 查询一周安排时，不要先复述完整的日期范围，不要输出”安排如下”。直接说明有日程的日期和空闲情况。
+
+## 核心规则（必须严格遵守，违反即为错误）
+
+### 禁止只播报查询承诺
+以下回复模式属于错误，绝不允许出现：
+- “我先查询一下”后结束当前轮，不调用 query_events
+- “我先看一下你的日历”后结束当前轮，不调用 query_events
+- “稍等我查一下你的日程安排”后结束当前轮，不调用 query_events
+- 任何暗示将查询、但实际上没有在当前轮调用 query_events 的回复
+
+正确做法：只要回答需要依赖日历数据（查询日程、判断空闲、删除匹配、推荐空闲时间），必须在当前轮立即调用 query_events。工具调用不需要提前向用户播报，不要先输出一段”我去查一下”再调用工具，直接调用工具，拿到真实结果后再回复。
+
+### 明确范围内找空闲时间必须立即查询
+当用户要求在明确时间范围内”随便找个时间”、”找个空闲时间”或类似表述时：
+1. 必须立即在当前轮调用 query_events 查询该范围已有日程
+2. 根据真实查询结果提出可用候选时间
+3. 禁止跳过 query_events 直接建议时间
+4. 禁止先回复”让我看看这段时间的安排”后结束当前轮
+
+### 可选字段不要追问
+以下字段均为可选，不要因为缺少这些字段而拒绝创建或反复追问：
+- 公司名称、地点/位置
+- 备注、描述
+- 参与人
+
+日程标题（title）是唯一必填字段。”面试”、”开会”、”吃饭”等简短标题已经足够，不要要求用户补充更详细的标题。
 
 ## 通用原则
-1. 用户提供的信息可能不完整或模糊。允许通过多轮对话逐步澄清，不要猜测关键字段。
-2. 当需要查询日历时，必须实际调用 query_events，不得只回复“我先查询一下”或假装已经查询。
-3. 查询结果为空时，应明确说明该时间范围内没有已有安排。
-4. 不要向用户暴露工具名称、参数格式、eventId 或内部执行细节。
-5. 创建和删除操作最终都会由系统展示审批面板。调用写工具前不要额外询问“是否确认创建”或“是否确认删除”。
+1. 用户提供的信息可能不完整或模糊。允许通过多轮对话逐步澄清必要字段（标题、时间），但不追问可选字段。
+2. 查询结果为空时，应明确说明该时间范围内没有已有安排。
+3. 不要向用户暴露工具名称、参数格式、eventId 或内部执行细节。
+4. 创建和删除操作最终都会由系统展示审批面板。调用写工具前不要额外询问”是否确认创建”或”是否确认删除”。
 
 ## 查询日程
 当用户询问日程安排、空闲时间或某段时间是否有空时：
@@ -125,21 +181,21 @@ export function buildSystemPrompt(): string {
 2. 调用 query_events 查询已有日程。
 3. 根据实际查询结果回答用户。
 
-如果用户希望安排日程，但只给出了模糊时间范围，例如“这周”“下周”“周三下午”“找个空闲时间”：
+如果用户希望安排日程，但只给出了模糊时间范围，例如”这周””下周””周三下午””找个空闲时间”：
 1. 先调用 query_events 查询相关时间范围内的已有日程。
-2. 根据查询结果提出一个明确的候选时间段，例如“周三 14:00–15:00 可以吗？”。
+2. 根据查询结果提出一个明确的候选时间段，例如”周三 14:00–15:00 可以吗？”。
 3. 如果无法可靠判断合适时间，简要列出已有安排并请用户选择，不得擅自决定。
 
 ## 创建日程
 调用 create_event 前，需要确认：
-- 标题
+- 标题（必填，简短即可，如”面试”、”开会”）
 - 精确开始时间
 - 预计时长，或者精确结束时间
 
 处理规则：
-1. 缺少必要信息时，继续询问用户。
+1. 缺少必要信息时，继续询问用户。不追问公司、地点、备注等可选字段。
 2. 用户只给出模糊时间范围时，先查询已有日程，再提出明确候选时间。
-3. 用户只说“可以”“好的”“就这样”等简短回复时，结合当前 thread 中最近的候选方案继续处理。
+3. 用户只说”可以””好的””就这样”等简短回复时，结合当前 thread 中最近的候选方案继续处理。
 4. 用户给出时长时，根据已确认的开始时间计算结束时间。
 5. 仅当标题、精确开始时间和结束时间都足够明确时调用 create_event。
 6. 不得因为用户表达了创建意图就立即调用 create_event。
@@ -150,7 +206,7 @@ export function buildSystemPrompt(): string {
 2. 如果用户通过标题、日期或自然语言描述目标日程，先调用 query_events 查询。
 3. 如果查询结果只有一个明确匹配项，调用 delete_event。
 4. 如果存在多个可能匹配项，列出必要信息并询问用户选择。
-5. 不得只回复“我先查询一下”而不实际调用 query_events。
+5. 查询匹配日程时必须在当前轮立即调用 query_events，禁止先回复”我先查一下”后结束当前轮。
 6. 不得虚构已经删除成功。实际结果以工具返回为准。`;
 }
 
@@ -253,7 +309,6 @@ export class DeepAgentsRuntime implements AgentRuntime {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let eventStream: any = undefined;
     let toolCallsDrain: Promise<void> | undefined;
-    let eventsChanged = false;
     let settled = false;
 
     try {
@@ -320,23 +375,19 @@ export class DeepAgentsRuntime implements AgentRuntime {
             }
 
             if (toolEvent === "tool-finished") {
-              const tn = toolNames.get(callId) ?? "";
+              const tn = resolveFinishedToolName(
+                toolNames.get(callId) ?? (data.tool_name as string) ?? "",
+                data.output,
+              );
               yield {
                 type: "tool_finished",
                 callId,
                 tool: tn,
                 result: data.output,
               };
-              // 检测写操作是否成功执行
-              if (tn === "create_event" || tn === "delete_event") {
-                try {
-                  const parsed = typeof data.output === "string"
-                    ? JSON.parse(data.output as string)
-                    : data.output;
-                  if (parsed?.action === "created" || parsed?.action === "deleted") {
-                    eventsChanged = true;
-                  }
-                } catch { /* ignore parse errors */ }
+              // 成功写入后立即通知前端局部拉取，不等待 Agent 完整回复结束。
+              if (didCalendarWriteChange(tn, data.output)) {
+                yield { type: "events_changed" };
               }
               continue;
             }
@@ -355,7 +406,7 @@ export class DeepAgentsRuntime implements AgentRuntime {
 
         // for-await 结束后等待 output Promise 终态，避免竞态导致未捕获的 interrupt
         if (!signal?.aborted) {
-          yield* this._settleStreamOutput(eventStream, threadId, eventsChanged);
+          yield* this._settleStreamOutput(eventStream, threadId);
           settled = true;
         }
       } finally {
@@ -407,7 +458,6 @@ export class DeepAgentsRuntime implements AgentRuntime {
   private async *_settleStreamOutput(
     eventStream: any,
     threadId: string,
-    eventsChanged: boolean,
   ): AsyncIterable<AgentStreamEvent> {
     // 1) 等待 output Promise 终态（消费 rejection 避免 unhandledRejection）
     if (eventStream?.output && typeof eventStream.output.then === "function") {
@@ -424,9 +474,6 @@ export class DeepAgentsRuntime implements AgentRuntime {
 
     // 2) 公开 API 明确表示正常完成时直接返回，避免正常请求承担 fallback 延迟
     if (eventStream?.interrupted === false) {
-      if (eventsChanged) {
-        yield { type: "events_changed" };
-      }
       yield { type: "done" };
       return;
     }
@@ -458,9 +505,6 @@ export class DeepAgentsRuntime implements AgentRuntime {
     }
 
     // 6) 兼容缺少 interrupted 公开标志的旧实现
-    if (eventsChanged) {
-      yield { type: "events_changed" };
-    }
     yield { type: "done" };
   }
 
