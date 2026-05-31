@@ -8,6 +8,14 @@ import {
   streamMessage,
   resumeMessage,
 } from "@/frontend/api/agentClient";
+import { TtsController } from "@/frontend/infrastructure/tts/ttsController";
+import { createPcmPlaybackQueue } from "@/frontend/infrastructure/tts/pcmPlayer";
+
+// ---------------------------------------------------------------------------
+// SubmitSource
+// ---------------------------------------------------------------------------
+
+export type SubmitSource = "text" | "voice";
 
 // ---------------------------------------------------------------------------
 // ToolActivity — 工具调用生命周期状态
@@ -32,6 +40,38 @@ export function isCalendarTool(tool: string): boolean {
 export function shouldStopVoice(hasBlocker: boolean, isListening: boolean): boolean {
   return hasBlocker && isListening;
 }
+
+// ---------------------------------------------------------------------------
+// VoiceApproval — 纯状态机：管理审批提示播报生命周期（可独立测试）
+// ---------------------------------------------------------------------------
+
+export interface VoiceApprovalState {
+  readonly voiceTurn: boolean;
+  readonly prompted: boolean;
+}
+
+export const VoiceApproval = {
+  /** 新轮次开始：设置是否语音轮次，重置提示标记。 */
+  startTurn(voice: boolean): VoiceApprovalState {
+    return { voiceTurn: voice, prompted: false };
+  },
+
+  /** 进入 resume 前重置提示标记，使新 pendingAction 可以再次播报。 */
+  resetForNewAction(state: VoiceApprovalState): VoiceApprovalState {
+    return { ...state, prompted: false };
+  },
+
+  /**
+   * 尝试标记已播报。若为语音轮次且尚未播报，返回 play=true 并标记。
+   * 纯函数，不产生副作用。
+   */
+  tryPrompt(state: VoiceApprovalState): { state: VoiceApprovalState; play: boolean } {
+    if (state.voiceTurn && !state.prompted) {
+      return { state: { ...state, prompted: true }, play: true };
+    }
+    return { state, play: false };
+  },
+};
 
 // ---------------------------------------------------------------------------
 // StreamState — 纯 reducer（可独立测试）
@@ -167,10 +207,17 @@ export interface AgentSessionState {
   isSubmitting: boolean;
   isExecutingPending: boolean;
   error: string | null;
-  submitText: (text: string) => Promise<void>;
+  voiceError: string | null;
+  isTtsPlaying: boolean;
+  submitText: (text: string, source?: SubmitSource) => Promise<void>;
   confirmPending: () => Promise<void>;
   cancelPending: () => Promise<void>;
   clearSession: () => void;
+  resumeAudioContext: () => Promise<void>;
+  /** Abort the current Agent SSE stream without clearing threadId or messages. */
+  abortAgentStream: () => void;
+  /** Cancel the current TTS session and clear the PCM playback queue. */
+  cancelTts: () => void;
 }
 
 export function useAgentSession(
@@ -183,24 +230,70 @@ export function useAgentSession(
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isExecutingPending, setIsExecutingPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [isTtsPlaying, setIsTtsPlaying] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
+  const ttsRef = useRef<TtsController | null>(null);
 
   // 同步追踪最新 messages，submitText 中需要非异步快照避免 React 批量更新竞态
   const messagesRef = useRef<SessionMessage[]>([]);
   messagesRef.current = messages;
 
-  // 组件卸载时终止所有进行中的流
+  // 追踪当前提交来源 + 审批提示播报状态（纯状态机管理生命周期）
+  const approvalRef = useRef<VoiceApprovalState>(VoiceApproval.startTurn(false));
+
+  /** 懒加载 TtsController，同一 hook 实例复用 */
+  function getTts(): TtsController {
+    if (!ttsRef.current) {
+      const queue = createPcmPlaybackQueue(
+        undefined,
+        (playing) => setIsTtsPlaying(playing),
+      );
+      ttsRef.current = new TtsController(
+        queue,
+        (msg) => setVoiceError(msg),
+      );
+    }
+    return ttsRef.current;
+  }
+
+  // 备用的补充清理：当 pendingAction 变为 null 时重置提示标记。
+  // 主力重置在 submitText() 和 runResume() 中显式调用，本 effect 仅兜底。
+  useEffect(() => {
+    if (!pendingAction) {
+      approvalRef.current = VoiceApproval.resetForNewAction(approvalRef.current);
+    }
+  }, [pendingAction]);
+
+  /** 共享审批提示播报：取消当前 TTS → 启动短 session → 播报固定文本 → finish */
+  function playApprovalPrompt(): void {
+    const tts = getTts();
+    tts.cancel();
+    tts.start()
+      .then(() => {
+        tts.appendText("操作已准备好，请在界面确认。");
+        tts.finish();
+      })
+      .catch(() => {});
+  }
+
+  // 组件卸载时终止所有进行中的流并释放 TTS
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+      ttsRef.current?.dispose();
     };
   }, []);
 
   const submitText = useCallback(
-    async (text: string) => {
+    async (text: string, source: SubmitSource = "text") => {
       // 终止上一轮残留请求（含进行中的 resume）
       abortRef.current?.abort();
+      approvalRef.current = VoiceApproval.startTurn(source === "voice");
+      if (source === "voice") {
+        ttsRef.current?.cancel();
+      }
 
       const controller = new AbortController();
       abortRef.current = controller;
@@ -208,6 +301,15 @@ export function useAgentSession(
       setIsSubmitting(true);
       setIsExecutingPending(false);
       setError(null);
+
+      // 语音轮次：启动 TTS session
+      let tts: TtsController | null = null;
+      if (source === "voice") {
+        setVoiceError(null);
+        tts = getTts();
+        // 不阻塞文字提交，仅通知 begin
+        tts.start().catch(() => { /* TTS 失败不阻断文字对话 */ });
+      }
 
       const optimisticUser: SessionMessage = {
         kind: "user",
@@ -240,6 +342,13 @@ export function useAgentSession(
                 payload: event.review.arguments,
                 createdAt: new Date().toISOString(),
               });
+
+              // 语音发起轮次：播报固定审批提示（仅一次）
+              const promptResult = VoiceApproval.tryPrompt(approvalRef.current);
+              approvalRef.current = promptResult.state;
+              if (promptResult.play) {
+                playApprovalPrompt();
+              }
               return;
             }
 
@@ -247,6 +356,11 @@ export function useAgentSession(
             if (event.type === "events_changed") {
               onEventsChanged?.();
               return;
+            }
+
+            // 语音轮次：实时送入 TTS（播放状态由 PCM 队列自行管理）
+            if (event.type === "message_delta" && tts) {
+              tts.appendText(event.text);
             }
 
             streamState = reduceStreamState(streamState, event);
@@ -257,20 +371,28 @@ export function useAgentSession(
             setToolActivities(streamState.toolActivities);
             if (streamState.error) {
               setError(streamState.error);
+              // Agent 错误时取消 TTS（cancel 内部 clear 队列，playing 状态由队列回调管理）
+              if (tts) tts.cancel();
             }
           },
           controller.signal,
         );
 
         // 流正常结束（未 abort）
-        if (!controller.signal.aborted && streamState.done && !streamState.error) {
-          onEventsChanged?.();
+        if (!controller.signal.aborted) {
+          if (streamState.done && !streamState.error) {
+            onEventsChanged?.();
+            // 语音轮次：通知 TTS 文本发送完毕
+            if (tts) tts.finish();
+          }
         }
       } catch (err) {
         // abort 触发的异常直接忽略，不覆盖清理后的 UI
         if (controller.signal.aborted) return;
         const message = err instanceof Error ? err.message : "请求失败";
         setError(message);
+        // 异常时取消 TTS（cancel 内部 clear 队列，playing 状态由队列回调管理）
+        if (tts) tts.cancel();
       } finally {
         // 仅当 controller 仍是当前请求时才清理，避免覆盖新请求状态
         if (abortRef.current === controller) {
@@ -308,6 +430,10 @@ export function useAgentSession(
   const runResume = useCallback(
     async (decision: "approve" | "reject", preSubmit: SessionMessage[], savedPendingAction: PendingAction) => {
       abortRef.current?.abort();
+
+      // 进入 resume 前重置提示标记，使后续新的 interrupt 可以再次播报
+      approvalRef.current = VoiceApproval.resetForNewAction(approvalRef.current);
+
       const controller = new AbortController();
       abortRef.current = controller;
 
@@ -332,6 +458,13 @@ export function useAgentSession(
                 payload: event.review.arguments,
                 createdAt: new Date().toISOString(),
               });
+
+              // 语音发起轮次：resume 后新的 interrupt 也可播报（已在 runResume 入口重置标记）
+              const promptResult = VoiceApproval.tryPrompt(approvalRef.current);
+              approvalRef.current = promptResult.state;
+              if (promptResult.play) {
+                playApprovalPrompt();
+              }
               return;
             }
 
@@ -380,6 +513,7 @@ export function useAgentSession(
     setIsSubmitting(false);
     setIsExecutingPending(false);
     messagesRef.current = [];
+    ttsRef.current?.cancel();
     if (threadId) {
       void fetch(`/api/session?id=${encodeURIComponent(threadId)}`, { method: "DELETE" });
     }
@@ -388,7 +522,25 @@ export function useAgentSession(
     setToolActivities([]);
     setPendingAction(null);
     setError(null);
+    setVoiceError(null);
+    setIsTtsPlaying(false);
   }, [threadId]);
+
+  const resumeAudioContext = useCallback(async () => {
+    await getTts().ensureContext();
+  }, []);
+
+  const abortAgentStream = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsSubmitting(false);
+    setIsExecutingPending(false);
+  }, []);
+
+  const cancelTts = useCallback(() => {
+    ttsRef.current?.cancel();
+    setIsTtsPlaying(false);
+  }, []);
 
   return {
     threadId,
@@ -398,9 +550,14 @@ export function useAgentSession(
     isSubmitting,
     isExecutingPending,
     error,
+    voiceError,
+    isTtsPlaying,
     submitText,
     confirmPending,
     cancelPending,
     clearSession,
+    resumeAudioContext,
+    abortAgentStream,
+    cancelTts,
   };
 }

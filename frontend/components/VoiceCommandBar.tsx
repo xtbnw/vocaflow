@@ -4,6 +4,7 @@ import {
   Send,
   Mic,
   MicOff,
+  Volume2,
   Wrench,
   ChevronUp,
   ChevronDown,
@@ -15,11 +16,13 @@ import {
   AlertTriangle,
   ChevronRight,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionMessage } from "@/backend/domain/sessionTypes";
 import { useAgentSession, isCalendarTool, shouldStopVoice, type ToolActivity } from "@/frontend/hooks/useAgentSession";
 import { useVoiceInput } from "@/frontend/hooks/useVoiceInput";
 import { useCalendarEventsRefresh } from "@/frontend/hooks/useCalendarEvents";
+import { VADController } from "@/frontend/infrastructure/vad/vadController";
+import { executeBargeIn } from "@/frontend/infrastructure/vad/bargeIn";
 import { ActionPreviewPanel } from "./ActionPreviewPanel";
 
 export function VoiceCommandBar() {
@@ -34,20 +37,109 @@ export function VoiceCommandBar() {
     isSubmitting,
     isExecutingPending,
     error,
+    voiceError,
+    isTtsPlaying,
     submitText,
     confirmPending,
     cancelPending,
     clearSession,
+    resumeAudioContext,
+    abortAgentStream,
+    cancelTts,
   } = useAgentSession(triggerRefresh);
+
+  // Refs for functions declared later (useVoiceInput / useAgentSession) so
+  // handleVoiceAutoSubmit can be defined before them without circular imports.
+  const submitRef = useRef(submitText);
+  submitRef.current = submitText;
+  const stopRef = useRef<() => void>(() => {});
+  const clearInputRef = useRef<() => void>(() => {});
+  const expandRef = useRef<() => void>(() => {});
+
+  // Ref-wrapped blocker snapshot so the auto-submit callback (captured once
+  // in useVoiceInput) can read live blocker state without stale closures.
+  const blockerRef = useRef({ isSubmitting, pendingAction, isExecutingPending });
+  blockerRef.current = { isSubmitting, pendingAction, isExecutingPending };
+
+  const handleVoiceAutoSubmit = useCallback((text: string) => {
+    // Always stop ASR and invalidate the current round first — the controller
+    // already invalidated the round before calling us, but stopListening
+    // ensures the mic is off and the UI state is consistent.
+    stopRef.current();
+    const { isSubmitting: submitting, pendingAction: pending, isExecutingPending: executing } = blockerRef.current;
+    if (submitting || pending || executing) {
+      return;
+    }
+    clearInputRef.current();
+    expandRef.current();
+    submitRef.current(text, "voice");
+  }, []);
 
   const {
     inputText,
     setInputText,
     isListening,
     voiceSupported,
+    startListening,
     toggleListening,
     stopListening,
-  } = useVoiceInput();
+  } = useVoiceInput({ onAutoSubmit: handleVoiceAutoSubmit });
+
+  // Wire up late-bound refs
+  stopRef.current = stopListening;
+  clearInputRef.current = () => setInputText("");
+  expandRef.current = () => setCollapsed(false);
+
+  // -- auto-barge-in toggle (localStorage, default on) --
+  const [autoBargeIn, setAutoBargeIn] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return localStorage.getItem("vfAutoBargeIn") !== "false";
+  });
+
+  useEffect(() => {
+    localStorage.setItem("vfAutoBargeIn", String(autoBargeIn));
+  }, [autoBargeIn]);
+
+  // -- VAD controller --
+  const vadRef = useRef<VADController | null>(null);
+  const [vadDegraded, setVadDegraded] = useState(false);
+
+  // -- barge-in handler (shared by VAD trigger and manual mic click) --
+  const performBargeIn = useCallback(() => {
+    if (!voiceSupported) return; // defensive: ASR unavailable, don't interrupt TTS/SSE
+    executeBargeIn({
+      cancelTts,
+      abortSse: abortAgentStream,
+      stopVad: () => vadRef.current?.stop(),
+      startAsr: () => startListening(),
+    });
+  }, [cancelTts, abortAgentStream, startListening, voiceSupported]);
+
+  // -- VAD lifecycle --
+  useEffect(() => {
+    const shouldRun = isTtsPlaying && autoBargeIn && !vadDegraded && voiceSupported;
+
+    if (shouldRun && !vadRef.current?.isRunning) {
+      const vad = new VADController(
+        () => performBargeIn(),
+        (_msg) => setVadDegraded(true),
+      );
+      vadRef.current = vad;
+      vad.start();
+    }
+
+    if (!shouldRun && vadRef.current?.isRunning) {
+      vadRef.current.stop();
+    }
+  }, [isTtsPlaying, autoBargeIn, vadDegraded, voiceSupported, performBargeIn]);
+
+  // Dispose VAD on unmount
+  useEffect(() => {
+    return () => {
+      vadRef.current?.dispose();
+      vadRef.current = null;
+    };
+  }, []);
 
   const messageListRef = useRef<HTMLDivElement>(null);
 
@@ -66,6 +158,28 @@ export function VoiceCommandBar() {
     await submitText(text);
   };
 
+  const handleClearSession = () => {
+    stopListening();
+    clearSession();
+    setCollapsed(true);
+  };
+
+  const handleMicClick = async () => {
+    if (hasBlocker) return;
+
+    // 正在播报时点击麦克风 → 立即打断并开始新 ASR（不受自动打断开关影响）
+    if (isTtsPlaying) {
+      performBargeIn();
+      return;
+    }
+
+    // 在用户手势链路中恢复 AudioContext
+    if (voiceSupported) {
+      try { await resumeAudioContext(); } catch { /* 浏览器不支持 AudioContext 时忽略 */ }
+    }
+    toggleListening();
+  };
+
   const hasBlocker = !!pendingAction || isExecutingPending;
 
   useEffect(() => {
@@ -73,11 +187,6 @@ export function VoiceCommandBar() {
       stopListening();
     }
   }, [hasBlocker, isListening, stopListening]);
-
-  const handleClearSession = () => {
-    clearSession();
-    setCollapsed(true);
-  };
 
   const hasMessages = messages.length > 0;
   const hasToolActivities = toolActivities.length > 0;
@@ -112,6 +221,13 @@ export function VoiceCommandBar() {
                   <div className="mt-2 flex items-center gap-2 rounded-xl bg-[#ffdad6]/60 px-4 py-2.5 text-sm text-[#ba1a1a]">
                     <AlertTriangle className="h-4 w-4 shrink-0" />
                     <span>{error}</span>
+                  </div>
+                )}
+
+                {!error && voiceError && (
+                  <div className="mt-2 flex items-center gap-2 rounded-xl bg-[#fff9e6]/80 px-4 py-2.5 text-xs text-[#625f50]">
+                    <Volume2 className="h-3.5 w-3.5 shrink-0" />
+                    <span>{voiceError}</span>
                   </div>
                 )}
               </div>
@@ -194,56 +310,91 @@ export function VoiceCommandBar() {
         </div>
       )}
 
-      <div className="pointer-events-auto flex w-full max-w-[760px] items-center justify-center gap-3">
-        <button
-          className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full border shadow-sm transition-all duration-200 ${
-            hasBlocker
-              ? "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
-              : voiceSupported
-                ? isListening
-                  ? "border-red-300 bg-red-100 text-red-500 animate-pulse"
-                  : "vf-glass border-white/50 text-[#625f50] hover:scale-105 hover:bg-[#fff9e6]"
-                : "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
-          }`}
-          disabled={!voiceSupported || hasBlocker}
-          onClick={hasBlocker ? undefined : toggleListening}
-          title={
-            hasBlocker
-              ? "请先确认当前操作"
-              : voiceSupported
-                ? isListening
-                  ? "停止录音"
-                  : "语音输入"
-                : "浏览器不支持语音识别"
-          }
-        >
-          {voiceSupported ? (
-            <Mic className="h-5 w-5" />
-          ) : (
-            <MicOff className="h-5 w-5" />
-          )}
-        </button>
-
-        <form
-          className="vf-glass flex h-12 min-w-0 flex-1 items-center rounded-full border border-white/30 px-5 shadow-sm transition-colors focus-within:border-[#625f50]/50"
-          onSubmit={handleSubmit}
-        >
-          <input
-            className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
-            onChange={(e) => setInputText(e.target.value)}
-            placeholder={isSubmitting ? "处理中..." : hasBlocker ? "请先确认当前操作" : "输入指令..."}
-            type="text"
-            value={inputText}
-            disabled={isSubmitting || hasBlocker}
-          />
+      <div className="pointer-events-auto flex w-full max-w-[760px] flex-col items-center gap-2">
+        <div className="flex w-full items-center justify-center gap-3">
           <button
-            className="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#fff9e6] text-[#625f50] transition-colors hover:bg-[#e8e2d0] disabled:cursor-not-allowed disabled:opacity-40"
-            disabled={!inputText.trim() || isSubmitting || hasBlocker}
-            type="submit"
+            className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full border shadow-sm transition-all duration-200 ${
+              hasBlocker
+                ? "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
+                : voiceSupported
+                  ? isListening
+                    ? "border-red-300 bg-red-100 text-red-500 animate-pulse"
+                    : "vf-glass border-white/50 text-[#625f50] hover:scale-105 hover:bg-[#fff9e6]"
+                  : "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
+            }`}
+            disabled={!voiceSupported || hasBlocker}
+            onClick={hasBlocker ? undefined : handleMicClick}
+            title={
+              hasBlocker
+                ? "请先确认当前操作"
+                : voiceSupported
+                  ? isTtsPlaying
+                    ? "打断播报"
+                    : isListening
+                      ? "停止录音"
+                      : "语音输入"
+                  : "浏览器不支持语音识别"
+            }
           >
-            <Send className="h-3.5 w-3.5" />
+            {isTtsPlaying ? (
+              <Volume2 className="h-5 w-5 text-[#2e7d32] animate-pulse" />
+            ) : voiceSupported ? (
+              <Mic className="h-5 w-5" />
+            ) : (
+              <MicOff className="h-5 w-5" />
+            )}
           </button>
-        </form>
+
+          <form
+            className="vf-glass flex h-12 min-w-0 flex-1 items-center rounded-full border border-white/30 px-5 shadow-sm transition-colors focus-within:border-[#625f50]/50"
+            onSubmit={handleSubmit}
+          >
+            <input
+              className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
+              onChange={(e) => setInputText(e.target.value)}
+              placeholder={isSubmitting ? "处理中..." : hasBlocker ? "请先确认当前操作" : "输入指令..."}
+              type="text"
+              value={inputText}
+              disabled={isSubmitting || hasBlocker}
+            />
+            <button
+              className="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#fff9e6] text-[#625f50] transition-colors hover:bg-[#e8e2d0] disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={!inputText.trim() || isSubmitting || hasBlocker}
+              type="submit"
+            >
+              <Send className="h-3.5 w-3.5" />
+            </button>
+          </form>
+        </div>
+
+        {/* Auto-barge-in toggle */}
+        <label className="pointer-events-auto flex items-center gap-2 text-xs text-[#49473f]/70 cursor-pointer select-none">
+          <span>自动打断</span>
+          <button
+            role="switch"
+            aria-checked={autoBargeIn}
+            className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+              autoBargeIn ? "bg-[#2e7d32]/70" : "bg-[#49473f]/20"
+            }`}
+            onClick={() => setAutoBargeIn(!autoBargeIn)}
+            title={
+              vadDegraded
+                ? "麦克风权限未授权，仅支持手动打断"
+                : autoBargeIn
+                  ? "播报时开口自动打断（已开启）"
+                  : "播报时需点击麦克风打断"
+            }
+          >
+            <span
+              className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
+                autoBargeIn ? "translate-x-[18px]" : "translate-x-[3px]"
+              }`}
+            />
+          </button>
+          {vadDegraded && (
+            <span className="text-[#ba1a1a]/70">（仅手动模式）</span>
+          )}
+        </label>
       </div>
     </div>
   );

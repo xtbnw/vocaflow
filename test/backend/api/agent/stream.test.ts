@@ -354,6 +354,31 @@ test("stream emits text deltas in correct order", async () => {
   assert.equal((deltas[1] as { text: string }).text, "，今天有什么安排？");
 });
 
+test("stream sanitizes Markdown markers before emitting text deltas", async () => {
+  const runtime = new DeepAgentsRuntime(stubRepo(), {
+    createLLM: () => ({ model: "mock" }) as any,
+    createAgent: () =>
+      createStubAgent({
+        textChunks: [
+          { id: "msg-1", content: "你觉得 **9:00–" },
+          { id: "msg-1", content: "11:00** 可以吗？" },
+        ],
+      }),
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const collected: AgentStreamEvent[] = [];
+  for await (const ev of runtime.stream("安排面试", "thread-simple-text")) {
+    collected.push(ev);
+  }
+
+  const text = collected
+    .filter((e) => e.type === "message_delta")
+    .map((e) => (e as { text: string }).text)
+    .join("");
+  assert.equal(text, "你觉得 9:00 到 11:00 可以吗？");
+});
+
 test("stream emits tool_started and tool_finished events", async () => {
   const runtime = new DeepAgentsRuntime(stubRepo(), {
     createLLM: () => ({ model: "mock" }) as any,
