@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 
 import {
   DeepAgentsRuntime,
+  buildSystemPrompt,
   createQueryEventsTool,
   extractInterruptPayload,
   DEFAULT_LLM_CONFIG,
@@ -100,6 +101,16 @@ test("DEFAULT_LLM_CONFIG no longer uses reasoning_effort", () => {
     "reasoning_effort" in DEFAULT_LLM_CONFIG.modelKwargs,
     false,
   );
+});
+
+test("buildSystemPrompt allows clarification before create_event", () => {
+  const prompt = buildSystemPrompt();
+
+  assert.match(prompt, /允许通过多轮对话逐步澄清/);
+  assert.match(prompt, /仅当标题、精确开始时间和结束时间都足够明确时调用 create_event/);
+  assert.match(prompt, /不得因为用户表达了创建意图就立即调用 create_event/);
+  assert.match(prompt, /必须实际调用 query_events/);
+  assert.doesNotMatch(prompt, /必须直接调用 create_event 工具/);
 });
 
 test("DeepAgentsRuntime implements AgentRuntime interface", () => {
