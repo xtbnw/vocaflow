@@ -24,6 +24,7 @@ export class SQLiteCalendarRepository implements CalendarRepository {
 
   constructor(filename: string) {
     this.database = new Database(filename);
+    this.database.pragma("busy_timeout = 3000");
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS calendar_events (
         id TEXT PRIMARY KEY,
@@ -61,6 +62,52 @@ export class SQLiteCalendarRepository implements CalendarRepository {
 
   async delete(id: string): Promise<void> {
     this.database.prepare("DELETE FROM calendar_events WHERE id = ?").run(id);
+  }
+
+  async claimDueReminders(now: string): Promise<CalendarEvent[]> {
+    const nowMs = new Date(now).getTime();
+
+    const claim = this.database.transaction(() => {
+      const rows = this.database
+        .prepare(
+          `SELECT * FROM calendar_events
+           WHERE reminder_minutes_before IS NOT NULL
+             AND reminder_triggered IS NOT 1
+           ORDER BY start_at, id`,
+        )
+        .all() as CalendarEventRow[];
+
+      const due: CalendarEventRow[] = [];
+      const historical: CalendarEventRow[] = [];
+
+      for (const row of rows) {
+        const startMs = new Date(row.start_at).getTime();
+        if (startMs <= nowMs) {
+          historical.push(row);
+        } else {
+          const triggerMs = startMs - row.reminder_minutes_before! * 60_000;
+          if (triggerMs <= nowMs) {
+            due.push(row);
+          }
+        }
+      }
+
+      const updateStmt = this.database.prepare(
+        "UPDATE calendar_events SET reminder_triggered = 1 WHERE id = ?",
+      );
+      for (const row of historical) {
+        updateStmt.run(row.id);
+      }
+      for (const row of due) {
+        updateStmt.run(row.id);
+      }
+
+      return due.map((row) =>
+        toCalendarEvent({ ...row, reminder_triggered: 1 }),
+      );
+    });
+
+    return claim.immediate();
   }
 
   close(): void {

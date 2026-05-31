@@ -17,7 +17,7 @@ import type { ToolReviewInterrupt } from "../../domain/agentRuntime";
 // Preview builders — 计算审批预览信息（冲突检测等）
 // ---------------------------------------------------------------------------
 
-async function buildCreateEventPreview(
+export async function buildCreateEventPreview(
   args: CreateEventArgs,
   repository: CalendarRepository,
 ): Promise<ActionPreview> {
@@ -33,6 +33,13 @@ async function buildCreateEventPreview(
     },
     { label: "地点", value: String(args.location ?? "未指定") },
     { label: "备注", value: String(args.notes ?? "无") },
+    {
+      label: "提醒",
+      value:
+        args.reminderMinutesBefore !== undefined
+          ? `提前 ${args.reminderMinutesBefore} 分钟`
+          : "未设置",
+    },
   ];
 
   const warnings: string[] = [];

@@ -5,4 +5,5 @@ export interface CalendarRepository {
   save(event: CalendarEvent): Promise<CalendarEvent>;
   update(event: CalendarEvent): Promise<CalendarEvent>;
   delete(id: string): Promise<void>;
+  claimDueReminders(now: string): Promise<CalendarEvent[]>;
 }

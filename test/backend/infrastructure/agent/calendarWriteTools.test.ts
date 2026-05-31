@@ -22,6 +22,7 @@ function stubRepo(events: CalendarEvent[] = []): CalendarRepository {
     delete: async (id) => {
       deleted.push(id as string);
     },
+    claimDueReminders: async () => [],
     // For test inspection
     _saved: saved,
     _deleted: deleted,
@@ -226,6 +227,7 @@ test("delete event handler reports fail when event not found", async () => {
     save: async (e) => e as CalendarEvent,
     update: async (e) => e as CalendarEvent,
     delete: async () => { throw new Error("not found"); },
+    claimDueReminders: async () => [],
   };
   const handler = deleteEventHandler(throwingRepo);
 

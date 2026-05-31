@@ -33,6 +33,7 @@ function stubRepo(events: CalendarEvent[] = []): CalendarRepository {
     save: async (e) => e,
     update: async (e) => e,
     delete: async () => {},
+    claimDueReminders: async () => [],
   };
 }
 
@@ -312,6 +313,7 @@ test("runtime captures single business tool and scripted agent invokes query_eve
     save: async (e) => e,
     update: async (e) => e,
     delete: async () => {},
+    claimDueReminders: async () => [],
   };
 
   let capturedTools: any[] = [];
@@ -1063,6 +1065,7 @@ test("real LG: create_event interrupt then approve saves exactly once", async ()
     save: async (e) => { saved.push(e as CalendarEvent); return e as CalendarEvent; },
     update: async (e) => e as CalendarEvent,
     delete: async () => {},
+    claimDueReminders: async () => [],
   };
 
   const { createCreateEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");
@@ -1121,6 +1124,7 @@ test("real LG: create_event interrupt then reject does NOT save", async () => {
     save: async (e) => { saved.push(e as CalendarEvent); return e as CalendarEvent; },
     update: async (e) => e as CalendarEvent,
     delete: async () => {},
+    claimDueReminders: async () => [],
   };
 
   const { createCreateEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");
@@ -1175,6 +1179,7 @@ test("real LG: duplicate resume does not double-write", async () => {
     save: async (e) => { saved.push(e as CalendarEvent); return e as CalendarEvent; },
     update: async (e) => e as CalendarEvent,
     delete: async () => {},
+    claimDueReminders: async () => [],
   };
 
   const { createCreateEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");
@@ -1243,6 +1248,7 @@ test("real LG: create_event interrupt preview includes conflict warnings", async
     save: async (e) => e as CalendarEvent,
     update: async (e) => e as CalendarEvent,
     delete: async () => {},
+    claimDueReminders: async () => [],
   };
 
   const { createCreateEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");
@@ -1294,6 +1300,7 @@ test("real LG: delete_event interrupt then reject does NOT delete", async () => 
     save: async (e) => e as CalendarEvent,
     update: async (e) => e as CalendarEvent,
     delete: async (id) => { deleted.push(id as string); },
+    claimDueReminders: async () => [],
   };
 
   const { createDeleteEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");
@@ -1347,6 +1354,7 @@ test("real LG: delete_event interrupt then approve deletes exactly once", async 
     save: async (e) => e as CalendarEvent,
     update: async (e) => e as CalendarEvent,
     delete: async (id) => { deleted.push(id as string); },
+    claimDueReminders: async () => [],
   };
 
   const { createDeleteEventTool } = await import("../../../../backend/infrastructure/agent/calendarWriteTools");

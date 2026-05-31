@@ -20,6 +20,7 @@ function stubRepo(): CalendarRepository {
     save: async (e) => e,
     update: async (e) => e,
     delete: async () => {},
+    claimDueReminders: async () => [],
   };
 }
 
