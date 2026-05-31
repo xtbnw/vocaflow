@@ -12,7 +12,14 @@ export interface AgentRuntime {
 
   /**
    * 接收一条用户消息并返回 agent 最终响应。
+   * threadId 用于标识对话线程，同一 threadId 可延续上下文。
    * 旁路 SSE 路由仅依赖此方法，不感知内部实现细节。
    */
-  invoke(message: string): Promise<{ messages: unknown[] }>;
+  invoke(message: string, threadId: string): Promise<{ messages: unknown[] }>;
+
+  /**
+   * 删除指定线程的 checkpoint 状态。
+   * 删除后该 threadId 不再可恢复历史上下文。
+   */
+  deleteThread(threadId: string): Promise<void>;
 }

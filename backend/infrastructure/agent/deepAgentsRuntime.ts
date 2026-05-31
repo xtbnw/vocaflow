@@ -1,8 +1,12 @@
+import { mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import Database from "better-sqlite3";
 import { HumanMessage } from "langchain";
 import { ChatDeepSeek } from "@langchain/deepseek";
 import { createDeepAgent } from "deepagents";
 import type { DeepAgent } from "deepagents";
 import { tool, type StructuredToolInterface } from "@langchain/core/tools";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { AgentRuntime } from "../../domain/agentRuntime";
 import type { CalendarRepository } from "../../domain/calendarRepository";
 import {
@@ -15,6 +19,8 @@ export interface DeepAgentsRuntimeDeps {
   createLLM?: () => ChatDeepSeek;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   createAgent?: (llm: ChatDeepSeek, tools: StructuredToolInterface[]) => DeepAgent;
+  /** 注入自定义 checkpointer（默认使用 data/vocaflow-checkpoints.sqlite）。 */
+  getCheckpointer?: () => SqliteSaver;
 }
 
 /** 默认 ChatDeepSeek 配置，单元测试可基于此验证。 */
@@ -51,6 +57,18 @@ export function createQueryEventsTool(repository: CalendarRepository) {
   );
 }
 
+function defaultCheckpointerPath(): string {
+  return join(process.cwd(), "data", "vocaflow-checkpoints.sqlite");
+}
+
+function createDefaultCheckpointer(): SqliteSaver {
+  const dbPath = defaultCheckpointerPath();
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  db.pragma("journal_mode=WAL");
+  return new SqliteSaver(db);
+}
+
 /**
  * Deep Agents 运行时。
  *
@@ -58,12 +76,14 @@ export function createQueryEventsTool(repository: CalendarRepository) {
  * 使用 Deep Agents 默认 StateBackend（thread 内临时虚拟文件，不接触宿主文件系统）。
  * Tavily、sandbox、shell、宿主文件系统访问通过默认 StateBackend 保持隔离。
  * 通过 Deps 注入支持单元测试（测试替身），默认走正式链路。
+ * 通过 SqliteSaver checkpoint 持久化 thread 状态，支持同一 threadId 延续上下文。
  */
 export class DeepAgentsRuntime implements AgentRuntime {
   readonly kind = "deepagents";
   readonly model = "deepseek-v4-pro";
 
   private _agent: DeepAgent;
+  private _checkpointer: SqliteSaver;
 
   constructor(repository: CalendarRepository, deps?: DeepAgentsRuntimeDeps) {
     const llm = deps?.createLLM
@@ -71,6 +91,10 @@ export class DeepAgentsRuntime implements AgentRuntime {
       : new ChatDeepSeek(DEFAULT_LLM_CONFIG);
 
     const tools = [createQueryEventsTool(repository)];
+
+    this._checkpointer = deps?.getCheckpointer
+      ? deps.getCheckpointer()
+      : createDefaultCheckpointer();
 
     this._agent = deps?.createAgent
       ? deps.createAgent(llm, tools)
@@ -83,6 +107,7 @@ export class DeepAgentsRuntime implements AgentRuntime {
           // createQueryEventsTool 返回的 LangChain tool 实例与之兼容但类型推断受限。
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           tools: tools as any,
+          checkpointer: this._checkpointer,
           systemPrompt:
             "你是一个日历语音助手。你可以通过 query_events 工具查询用户的日程。" +
             "当用户询问日程安排、空闲时间或需要查看日历时，请先调用 query_events。" +
@@ -95,12 +120,17 @@ export class DeepAgentsRuntime implements AgentRuntime {
     return this._agent;
   }
 
-  async invoke(message: string): Promise<{ messages: unknown[] }> {
-    const result = await this._agent.invoke({
-      messages: [new HumanMessage(message)],
-    });
+  async invoke(message: string, threadId: string): Promise<{ messages: unknown[] }> {
+    const result = await this._agent.invoke(
+      { messages: [new HumanMessage(message)] },
+      { configurable: { thread_id: threadId } },
+    );
 
     const messages = (result.messages ?? []) as unknown[];
     return { messages };
+  }
+
+  async deleteThread(threadId: string): Promise<void> {
+    await this._checkpointer.deleteThread(threadId);
   }
 }

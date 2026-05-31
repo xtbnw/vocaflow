@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import Database from "better-sqlite3";
 
 import {
   DeepAgentsRuntime,
@@ -9,6 +13,9 @@ import {
 import type { CalendarRepository } from "../../../../backend/domain/calendarRepository";
 import type { CalendarEvent } from "../../../../backend/domain/calendarTypes";
 import { QueryEventsArgsSchema } from "../../../../backend/domain/calendarTypes";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { emptyCheckpoint } from "@langchain/langgraph-checkpoint";
+import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint";
 import { AIMessage } from "@langchain/core/messages";
 import type { DeepAgent } from "deepagents";
 
@@ -36,7 +43,45 @@ const sampleEvent: CalendarEvent = {
 };
 
 // ---------------------------------------------------------------------------
-// Existing tests (adapted for new constructor signature)
+// Temp DB helpers for checkpoint tests
+// ---------------------------------------------------------------------------
+
+interface TempCheckpointer {
+  checkpointer: SqliteSaver;
+  db: Database.Database;
+  dir: string;
+  dbPath: string;
+}
+
+function createTempCheckpointer(): TempCheckpointer {
+  const dir = mkdtempSync(join(tmpdir(), "vocaflow-test-"));
+  const dbPath = join(dir, "checkpoints.sqlite");
+  const db = new Database(dbPath);
+  db.pragma("journal_mode=WAL");
+  return { checkpointer: new SqliteSaver(db), db, dir, dbPath };
+}
+
+function stubCheckpointer(): SqliteSaver {
+  const db = new Database(":memory:");
+  return new SqliteSaver(db);
+}
+
+function testMetadata(overrides?: Partial<CheckpointMetadata>): CheckpointMetadata {
+  return {
+    source: "input",
+    step: -1,
+    parents: {},
+    ...overrides,
+  };
+}
+
+function testCheckpoint(overrides?: Partial<ReturnType<typeof emptyCheckpoint>>) {
+  const cp = emptyCheckpoint();
+  return { ...cp, ...overrides, id: overrides?.id ?? cp.id };
+}
+
+// ---------------------------------------------------------------------------
+// Existing tests (updated for new invoke signature with threadId)
 // ---------------------------------------------------------------------------
 
 test("DEFAULT_LLM_CONFIG has thinking explicitly disabled", () => {
@@ -86,6 +131,7 @@ test("DeepAgentsRuntime passes llm with thinking disabled to agent factory", () 
       capturedLLM = llm;
       return stubAgent;
     },
+    getCheckpointer: () => stubCheckpointer(),
   });
 
   assert.notEqual(capturedLLM!, undefined);
@@ -177,18 +223,18 @@ test("queryEventsArgsSchema accepts valid args without keyword", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Agent integration tests
+// Agent integration tests (updated for threadId)
 // ---------------------------------------------------------------------------
 
-test("invoke delegates to agent and returns messages", async () => {
-  // 验证 DeepAgentsRuntime.invoke 正确将用户消息转发给内部 agent
-  // 并返回 agent 结果中的 messages
+test("invoke delegates to agent with threadId in configurable", async () => {
   const repo = stubRepo();
   let receivedMessages: any[] | undefined;
+  let receivedConfig: any;
 
   const stubAgent = {
-    invoke: async (input: { messages: any[] }) => {
+    invoke: async (input: { messages: any[] }, config?: any) => {
       receivedMessages = input.messages;
+      receivedConfig = config;
       return {
         messages: [
           ...input.messages,
@@ -201,14 +247,19 @@ test("invoke delegates to agent and returns messages", async () => {
   const runtime = new DeepAgentsRuntime(repo, {
     createLLM: () => stubAgent as any,
     createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
   });
 
-  const result = await runtime.invoke("你好");
+  const result = await runtime.invoke("你好", "thread-test-1");
 
   // 验证 agent 收到了 HumanMessage
   assert.ok(receivedMessages);
   assert.equal(receivedMessages!.length, 1);
   assert.equal(receivedMessages![0].constructor.name, "HumanMessage");
+
+  // 验证 config 中传递了 thread_id
+  assert.ok(receivedConfig);
+  assert.deepEqual(receivedConfig.configurable, { thread_id: "thread-test-1" });
 
   // 验证结果包含消息
   assert.ok(result.messages.length >= 2);
@@ -230,9 +281,10 @@ test("invoke returns empty messages when agent returns none", async () => {
   const runtime = new DeepAgentsRuntime(repo, {
     createLLM: () => stubAgent as any,
     createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
   });
 
-  const result = await runtime.invoke("测试");
+  const result = await runtime.invoke("测试", "thread-empty");
   assert.deepEqual(result.messages, []);
 });
 
@@ -257,7 +309,7 @@ test("runtime captures single business tool and scripted agent invokes query_eve
       capturedTools = tools;
       // scripted stub agent：invoke 中直接调用 query_events 工具并将结果反馈给调用方
       return {
-        invoke: async (input: { messages: any[] }) => {
+        invoke: async (input: { messages: any[] }, _config?: any) => {
           receivedInput = input;
           const toolResult = await capturedTools[0].invoke({
             rangeStartAt: "2026-06-01T00:00:00.000Z",
@@ -274,13 +326,14 @@ test("runtime captures single business tool and scripted agent invokes query_eve
         },
       } as any;
     },
+    getCheckpointer: () => stubCheckpointer(),
   });
 
   // 断言只有一个业务工具
   assert.equal(capturedTools.length, 1);
   assert.equal(capturedTools[0].name, "query_events");
 
-  const result = await runtime.invoke("今天有什么安排？");
+  const result = await runtime.invoke("今天有什么安排？", "thread-e2e");
 
   // 验证 repository.list() 被调用
   assert.ok(listCallCount > 0, "Expected repo.list() to be called at least once");
@@ -318,6 +371,239 @@ test("invoke: invalid tool args rejected by schema before handler", async () => 
 });
 
 // ---------------------------------------------------------------------------
+// Checkpoint & Thread lifecycle tests
+// ---------------------------------------------------------------------------
+
+test("SqliteSaver can persist and retrieve checkpoints", async () => {
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-cp-1";
+
+  try {
+    const config = {
+      configurable: { thread_id: threadId },
+    };
+    await checkpointer.put(
+      config,
+      testCheckpoint(),
+      testMetadata(),
+    );
+
+    const tuple = await checkpointer.getTuple(config);
+    assert.ok(tuple, "Expected checkpoint tuple to exist");
+    assert.equal(tuple!.config?.configurable?.thread_id, threadId);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("SqliteSaver deleteThread removes checkpoint", async () => {
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-del-1";
+
+  try {
+    const config = {
+      configurable: { thread_id: threadId },
+    };
+    await checkpointer.put(
+      config,
+      testCheckpoint(),
+      testMetadata(),
+    );
+
+    // 确认存在
+    let tuple = await checkpointer.getTuple(config);
+    assert.ok(tuple, "Expected checkpoint to exist before deletion");
+
+    // 删除
+    await checkpointer.deleteThread(threadId);
+
+    // 确认不存在
+    tuple = await checkpointer.getTuple(config);
+    assert.equal(tuple, undefined);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("deleteThread on runtime delegates to SqliteSaver", async () => {
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-del-runtime";
+
+  try {
+    const config = {
+      configurable: { thread_id: threadId },
+    };
+    await checkpointer.put(
+      config,
+      testCheckpoint(),
+      testMetadata(),
+    );
+
+    // 创建 runtime 并注入同一个 checkpointer
+    const repo = stubRepo();
+    const stubAgent = {
+      invoke: async (input: any, _config?: any) => ({
+        messages: [...input.messages, new AIMessage({ content: "ok" })],
+      }),
+    };
+
+    const runtime = new DeepAgentsRuntime(repo, {
+      createLLM: () => stubAgent as any,
+      createAgent: () => stubAgent as any,
+      getCheckpointer: () => checkpointer,
+    });
+
+    // 确认 checkpoint 存在
+    let tuple = await checkpointer.getTuple(config);
+    assert.ok(tuple, "Expected checkpoint to exist before deleteThread");
+
+    // 通过 runtime 删除
+    await runtime.deleteThread(threadId);
+
+    // 确认已删除
+    tuple = await checkpointer.getTuple(config);
+    assert.equal(tuple, undefined);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("re-creating runtime with same checkpoint DB preserves thread state", async () => {
+  const { dbPath, checkpointer: saver1, db: db1, dir } = createTempCheckpointer();
+  const threadId = "thread-recreate";
+
+  try {
+    // Phase 1: 用 saver1 写入 checkpoint
+    const config = {
+      configurable: { thread_id: threadId },
+    };
+    await saver1.put(
+      config,
+      testCheckpoint(),
+      testMetadata(),
+    );
+
+    // 关闭第一个连接，确认数据已落盘
+    db1.close();
+
+    // Phase 2: 用同一个 dbPath 打开第二个连接，模拟"重新创建 runtime"
+    const db2 = new Database(dbPath);
+    db2.pragma("journal_mode=WAL");
+    const saver2 = new SqliteSaver(db2);
+
+    try {
+      const tuple = await saver2.getTuple(config);
+      assert.ok(tuple, "Expected thread state to be readable from re-created checkpointer");
+      assert.equal(tuple!.config?.configurable?.thread_id, threadId);
+    } finally {
+      db2.close();
+    }
+  } finally {
+    // db1 已在 phase 1 关闭；如果 phase 1 抛异常则在此兜底
+    try { db1.close(); } catch {}
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("invoke with same threadId passes consistent config to agent", async () => {
+  // 验证同一 threadId 在连续两次 invoke 中都传递相同 thread_id
+  const repo = stubRepo();
+  const configsReceived: any[] = [];
+
+  const stubAgent = {
+    invoke: async (input: any, config?: any) => {
+      configsReceived.push(config);
+      return {
+        messages: [...input.messages, new AIMessage({ content: "ok" })],
+      };
+    },
+  };
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  await runtime.invoke("第一条消息", "thread-consistent");
+  await runtime.invoke("第二条消息", "thread-consistent");
+
+  assert.equal(configsReceived.length, 2);
+  assert.deepEqual(configsReceived[0].configurable, { thread_id: "thread-consistent" });
+  assert.deepEqual(configsReceived[1].configurable, { thread_id: "thread-consistent" });
+});
+
+test("invoke with different threadIds passes distinct config to agent", async () => {
+  const repo = stubRepo();
+  const configsReceived: any[] = [];
+
+  const stubAgent = {
+    invoke: async (input: any, config?: any) => {
+      configsReceived.push(config);
+      return {
+        messages: [...input.messages, new AIMessage({ content: "ok" })],
+      };
+    },
+  };
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  await runtime.invoke("消息A", "thread-a");
+  await runtime.invoke("消息B", "thread-b");
+
+  assert.equal(configsReceived.length, 2);
+  assert.deepEqual(configsReceived[0].configurable, { thread_id: "thread-a" });
+  assert.deepEqual(configsReceived[1].configurable, { thread_id: "thread-b" });
+});
+
+test("SqliteSaver with :memory: DB supports full checkpoint lifecycle", async () => {
+  const db = new Database(":memory:");
+  const checkpointer = new SqliteSaver(db);
+  const threadId = "thread-mem-lifecycle";
+
+  const config = {
+    configurable: { thread_id: threadId },
+  };
+
+  // 初始状态：无 checkpoint
+  let tuple = await checkpointer.getTuple(config);
+  assert.equal(tuple, undefined);
+
+  // 写入
+  await checkpointer.put(
+    config,
+    testCheckpoint(),
+    testMetadata(),
+  );
+
+  // 确认存在
+  tuple = await checkpointer.getTuple(config);
+  assert.ok(tuple);
+
+  // 追加第二个 checkpoint
+  await checkpointer.put(
+    config,
+    testCheckpoint(),
+    testMetadata({ source: "loop", step: 1 }),
+  );
+
+  tuple = await checkpointer.getTuple(config);
+  assert.ok(tuple);
+
+  // 删除
+  await checkpointer.deleteThread(threadId);
+  tuple = await checkpointer.getTuple(config);
+  assert.equal(tuple, undefined);
+});
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -329,5 +615,6 @@ function createTestRuntime() {
   return new DeepAgentsRuntime(repo, {
     createLLM: () => stubLLM as any,
     createAgent: () => stubAgent,
+    getCheckpointer: () => stubCheckpointer(),
   });
 }
