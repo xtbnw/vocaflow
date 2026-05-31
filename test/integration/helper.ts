@@ -51,6 +51,7 @@ export function createTempFixture(): TempFixture {
     delete: async (id) => {
       deleted.push(id as string);
     },
+    claimDueReminders: async () => [],
   };
 
   return { repo, saved, deleted, checkpointer, db, dir };
@@ -230,6 +231,7 @@ export function makeDeleteRepo(existingEvent: CalendarEvent, deleted: string[]):
     delete: async (id) => {
       deleted.push(id as string);
     },
+    claimDueReminders: async () => [],
   };
 }
 

@@ -157,3 +157,85 @@ test("runtime override does not affect repository list", async () => {
   const body = await res.json();
   assert.deepEqual(body.events, mockEvents);
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/reminders/claim-due
+// ---------------------------------------------------------------------------
+
+test("POST /api/reminders/claim-due returns { reminders } from repository", async () => {
+  const mockReminders: CalendarEvent[] = [
+    {
+      id: "rem-1",
+      title: "提醒日程",
+      startAt: "2026-06-01T10:00:00.000Z",
+      endAt: "2026-06-01T11:00:00.000Z",
+      reminderMinutesBefore: 30,
+      reminderTriggered: true,
+      source: "text",
+      createdAt: "2026-05-31T12:00:00.000Z",
+      updatedAt: "2026-05-31T12:00:00.000Z",
+    },
+  ];
+  __overrideRepositoryForTest({
+    list: async () => [],
+    save: async (e) => e,
+    update: async (e) => e,
+    delete: async () => {},
+    claimDueReminders: async (_now: string) => mockReminders,
+  } as any);
+
+  const { POST } = await import(
+    "../../../app/api/reminders/claim-due/route"
+  );
+  const res = await POST();
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(body.reminders, mockReminders);
+});
+
+test("POST /api/reminders/claim-due uses server time (no client now param)", async () => {
+  let capturedNow: string | undefined;
+  __overrideRepositoryForTest({
+    list: async () => [],
+    save: async (e) => e,
+    update: async (e) => e,
+    delete: async () => {},
+    claimDueReminders: async (now: string) => {
+      capturedNow = now;
+      return [];
+    },
+  } as any);
+
+  const { POST } = await import(
+    "../../../app/api/reminders/claim-due/route"
+  );
+  const res = await POST();
+  assert.equal(res.status, 200);
+
+  // Verify the route generated its own timestamp
+  assert.ok(capturedNow !== undefined);
+  const capturedMs = new Date(capturedNow!).getTime();
+  const nowMs = Date.now();
+  // Should be within a few seconds of now
+  assert.ok(Math.abs(capturedMs - nowMs) < 5000);
+});
+
+test("POST /api/reminders/claim-due returns 500 on repository error", async () => {
+  __overrideRepositoryForTest({
+    list: async () => [],
+    save: async (e) => e,
+    update: async (e) => e,
+    delete: async () => {},
+    claimDueReminders: async () => {
+      throw new Error("DB connection lost");
+    },
+  } as any);
+
+  const { POST } = await import(
+    "../../../app/api/reminders/claim-due/route"
+  );
+  const res = await POST();
+  assert.equal(res.status, 500);
+  const body = await res.json();
+  assert.equal(body.error, "Failed to claim due reminders");
+});

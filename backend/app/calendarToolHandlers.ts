@@ -20,6 +20,8 @@ export const createEventHandler = (repo: CalendarRepository) =>
       location: a.location,
       notes: a.notes,
       reminderMinutesBefore: a.reminderMinutesBefore,
+      reminderTriggered:
+        a.reminderMinutesBefore !== undefined ? false : undefined,
       source: "text",
       createdAt: now,
       updatedAt: now,

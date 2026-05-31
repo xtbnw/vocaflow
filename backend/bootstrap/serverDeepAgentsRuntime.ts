@@ -45,6 +45,9 @@ export const serverDeepAgentsRuntime = {
   async list(): Promise<CalendarEvent[]> {
     return getRepository().list();
   },
+  async claimDueReminders(now: string): Promise<CalendarEvent[]> {
+    return getRepository().claimDueReminders(now);
+  },
 };
 
 /** @internal 测试用：替换运行时实例。 */
