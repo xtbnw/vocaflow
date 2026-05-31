@@ -99,6 +99,18 @@ VocaFlow 是一个 AI 驱动的语音日历助手，采用 **Next.js 15 App Rout
 
 **VAD 自动打断**: 首版轻量启发式 VAD（`frontend/infrastructure/vad/`）基于 RMS 能量阈值，播报期间默认开启。提供 UI 开关（通过 localStorage 持久化），关闭后需点击麦克风手动打断。点击麦克风打断始终可用，作为稳定兜底。VAD 权限失败自动降级为仅手动模式。
 
+### 页面内提醒（In-App Reminders）
+
+**HTTP 轮询领取提醒**: 页面打开期间通过 `POST /api/reminders/claim-due` 定时领取到期且未触发的日程提醒。服务端在 SQLite 事务内原子领取并标记 `reminderTriggered`，避免多标签页重复触发。
+
+**提醒展示**: 使用应用内 toast（`frontend/components/ReminderToastHost.tsx`）展示提醒，一次一条，队列依次展示。浏览器 `Notification` API 作为可选增强，仅允许用户主动点击开启；未授权或被拒绝时 toast 仍然正常工作。
+
+**限制**: 只支持页面打开期间提醒。不使用 WebSocket、Service Worker、Push API 或离线推送。不承诺页面关闭后通知。不新增独立提醒表或实体。
+
+**轮询调度**: `frontend/hooks/useInAppReminders.ts` 管理轮询间隔（30 秒）和可见性变化触发，同一时刻最多一个请求，请求失败静默重试。
+
+**通知适配器**: `frontend/infrastructure/notification/browserNotification.ts` 封装浏览器 Notification API，权限降级时 toast 不受影响。
+
 ### 当前结构
 
 ```
@@ -114,6 +126,8 @@ app/                     # Next.js App Router 页面和路由
       resume/route.ts    # POST — 提交审批决策恢复 Agent 执行
     session/route.ts     # DELETE — 清除指定 thread 的 checkpoint
     events/route.ts      # GET — 获取所有日程
+    reminders/
+      claim-due/route.ts # POST — 原子领取到期提醒
 frontend/
   api/
     agentClient.ts       # Agent API 客户端 SSE 封装
@@ -121,6 +135,7 @@ frontend/
     useAgentSession.ts   # threadId 生命周期 + 流式状态聚合 + TTS 审批提示
     useVoiceInput.ts     # 语音输入 Hook (ASR + 自动提交)
     useCalendarEvents.tsx # 日历事件共享 Context + Hook
+    useInAppReminders.ts # 提醒轮询 Hook (30s 间隔 + visibility 触发)
     voiceAutoSubmitController.ts # 语音 final 防抖 800ms 自动提交控制器
   infrastructure/
     asr/                 # 浏览器 ASR (Web Speech API)
@@ -132,10 +147,13 @@ frontend/
       vadDetector.ts     # RMS 能量阈值 + VAD 决策逻辑
       vadController.ts   # 浏览器 VAD 生命周期 (getUserMedia)
       bargeIn.ts         # 打断编排 (cancelTts → abortSse → startAsr)
+    notification/         # 浏览器通知适配器
+      browserNotification.ts # Notification API 安全封装
   components/
     AppFrame.tsx          # 应用壳: 侧边导航 + 顶部移动端导航 + VoiceCommandBar
     VoiceCommandBar.tsx   # 底部语音/文字输入栏 (展示与事件绑定)
     ActionPreviewPanel.tsx # 待确认操作预览面板
+    ReminderToastHost.tsx # 提醒 toast 展示组件（含系统通知按钮）
     calendar/
       buildMonthGrid.ts   # 月历网格计算 (42-cell, 附带 isCurrentMonth/isToday)
 backend/
