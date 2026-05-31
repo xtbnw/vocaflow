@@ -329,81 +329,7 @@ export function VoiceCommandBar() {
       {/* ================================================================ */}
       {/* Voice Bar Capsule — prototype-inspired design                    */}
       {/* ================================================================ */}
-      <div className="pointer-events-auto flex w-full max-w-[760px] flex-col items-center gap-2">
-        {/* Auto-barge-in toggle */}
-        <label className="pointer-events-auto flex items-center gap-2 text-xs text-[#49473f]/70 cursor-pointer select-none">
-          <span>自动打断</span>
-          <button
-            role="switch"
-            aria-checked={autoBargeIn}
-            className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-              autoBargeIn ? "bg-[#2e7d32]/70" : "bg-[#49473f]/20"
-            }`}
-            onClick={() => setAutoBargeIn(!autoBargeIn)}
-            title={
-              vadDegraded
-                ? "麦克风权限未授权，仅支持手动打断"
-                : autoBargeIn
-                  ? "播报时开口自动打断（已开启）"
-                  : "播报时需点击麦克风打断"
-            }
-          >
-            <span
-              className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
-                autoBargeIn ? "translate-x-[18px]" : "translate-x-[3px]"
-              }`}
-            />
-          </button>
-          {vadDegraded && (
-            <span className="text-[#ba1a1a]/70">（仅手动模式）</span>
-          )}
-        </label>
-
-        {/* Text input — secondary, only visible when user clicks pencil */}
-        {textInputOpen ? (
-          <form
-            className="vf-glass flex h-12 w-full max-w-[400px] items-center rounded-full border border-white/30 px-5 shadow-sm transition-colors focus-within:border-[#625f50]/50"
-            onSubmit={handleSubmit}
-          >
-            <input
-              className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder={isSubmitting ? "处理中..." : hasBlocker ? "请先确认当前操作" : "输入指令..."}
-              type="text"
-              value={inputText}
-              disabled={isSubmitting || hasBlocker}
-              autoFocus
-            />
-            <button
-              className="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#fff9e6] text-[#625f50] transition-colors hover:bg-[#e8e2d0] disabled:cursor-not-allowed disabled:opacity-40"
-              disabled={!inputText.trim() || isSubmitting || hasBlocker}
-              type="submit"
-              aria-label="发送文字指令"
-            >
-              <Send className="h-3.5 w-3.5" />
-            </button>
-            <button
-              className="ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[#49473f]/50 transition-colors hover:bg-[#e5e2e1]/30"
-              onClick={() => { setTextInputOpen(false); setInputText(""); }}
-              type="button"
-              aria-label="关闭文字输入"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </form>
-        ) : (
-          /* Text input toggle button — secondary, compact */
-          <button
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full vf-glass border border-white/30 text-[#625f50]/60 transition-colors hover:text-[#625f50] hover:bg-[#fff9e6]/50"
-            onClick={() => setTextInputOpen(true)}
-            disabled={hasBlocker}
-            aria-label="打开文字输入"
-            title="文字输入"
-          >
-            <Pencil className="h-3.5 w-3.5" />
-          </button>
-        )}
-
+      <div className="pointer-events-auto flex w-full max-w-[760px] justify-center">
         {/* Main voice capsule */}
         <div
           className={`vf-glass vf-voice-bar ambient-glow flex h-16 items-center rounded-full p-1 overflow-hidden ${
@@ -495,6 +421,82 @@ export function VoiceCommandBar() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Secondary controls stay out of the primary voice path. */}
+      <div className="pointer-events-auto fixed bottom-24 right-4 flex max-w-[calc(100vw-2rem)] items-center justify-end gap-2">
+        {/* Auto-barge-in toggle */}
+        <label className="flex shrink-0 cursor-pointer select-none items-center gap-2 text-xs text-[#49473f]/70">
+          <span>自动打断</span>
+          <button
+            role="switch"
+            aria-checked={autoBargeIn}
+            className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+              autoBargeIn ? "bg-[#2e7d32]/70" : "bg-[#49473f]/20"
+            }`}
+            onClick={() => setAutoBargeIn(!autoBargeIn)}
+            title={
+              vadDegraded
+                ? "麦克风权限未授权，仅支持手动打断"
+                : autoBargeIn
+                  ? "播报时开口自动打断（已开启）"
+                  : "播报时需点击麦克风打断"
+            }
+          >
+            <span
+              className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
+                autoBargeIn ? "translate-x-[18px]" : "translate-x-[3px]"
+              }`}
+            />
+          </button>
+          {vadDegraded && (
+            <span className="hidden text-[#ba1a1a]/70 lg:inline">（仅手动模式）</span>
+          )}
+        </label>
+
+        {/* Text input — secondary, only visible when user clicks pencil */}
+        {textInputOpen ? (
+          <form
+            className="vf-glass flex h-12 w-[min(400px,calc(100vw-9rem))] items-center rounded-full border border-white/30 px-4 shadow-sm transition-colors focus-within:border-[#625f50]/50"
+            onSubmit={handleSubmit}
+          >
+            <input
+              className="min-w-0 flex-1 border-none bg-transparent p-0 text-sm text-[#1c1b1b] outline-none placeholder:text-[#49473f]/50 focus:ring-0"
+              onChange={(e) => setInputText(e.target.value)}
+              placeholder={isSubmitting ? "处理中..." : hasBlocker ? "请先确认当前操作" : "输入指令..."}
+              type="text"
+              value={inputText}
+              disabled={isSubmitting || hasBlocker}
+              autoFocus
+            />
+            <button
+              className="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#fff9e6] text-[#625f50] transition-colors hover:bg-[#e8e2d0] disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={!inputText.trim() || isSubmitting || hasBlocker}
+              type="submit"
+              aria-label="发送文字指令"
+            >
+              <Send className="h-3.5 w-3.5" />
+            </button>
+            <button
+              className="ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[#49473f]/50 transition-colors hover:bg-[#e5e2e1]/30"
+              onClick={() => { setTextInputOpen(false); setInputText(""); }}
+              type="button"
+              aria-label="关闭文字输入"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </form>
+        ) : (
+          <button
+            className="vf-glass flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/30 text-[#625f50]/60 transition-colors hover:bg-[#fff9e6]/50 hover:text-[#625f50]"
+            onClick={() => setTextInputOpen(true)}
+            disabled={hasBlocker}
+            aria-label="打开文字输入"
+            title="文字输入"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
     </div>
   );

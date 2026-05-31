@@ -63,6 +63,35 @@ export function createQueryEventsTool(repository: CalendarRepository) {
   );
 }
 
+function parseToolOutput(output: unknown): Record<string, unknown> | null {
+  try {
+    const parsed = typeof output === "string" ? JSON.parse(output) : output;
+    return parsed && typeof parsed === "object"
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resume 流可能只包含 tool-finished，没有同一流内的 tool-started。
+ * 此时使用领域结果 action 恢复工具名，确保成功写入立即通知前端刷新。
+ */
+export function resolveFinishedToolName(toolName: string, output: unknown): string {
+  if (toolName) return toolName;
+  const action = parseToolOutput(output)?.action;
+  if (action === "created") return "create_event";
+  if (action === "deleted") return "delete_event";
+  return "";
+}
+
+export function didCalendarWriteChange(toolName: string, output: unknown): boolean {
+  if (toolName !== "create_event" && toolName !== "delete_event") return false;
+  const action = parseToolOutput(output)?.action;
+  return action === "created" || action === "deleted";
+}
+
 function defaultCheckpointerPath(): string {
   return join(process.cwd(), "data", "vocaflow-checkpoints.sqlite");
 }
@@ -280,7 +309,6 @@ export class DeepAgentsRuntime implements AgentRuntime {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let eventStream: any = undefined;
     let toolCallsDrain: Promise<void> | undefined;
-    let eventsChanged = false;
     let settled = false;
 
     try {
@@ -347,23 +375,19 @@ export class DeepAgentsRuntime implements AgentRuntime {
             }
 
             if (toolEvent === "tool-finished") {
-              const tn = toolNames.get(callId) ?? "";
+              const tn = resolveFinishedToolName(
+                toolNames.get(callId) ?? (data.tool_name as string) ?? "",
+                data.output,
+              );
               yield {
                 type: "tool_finished",
                 callId,
                 tool: tn,
                 result: data.output,
               };
-              // 检测写操作是否成功执行
-              if (tn === "create_event" || tn === "delete_event") {
-                try {
-                  const parsed = typeof data.output === "string"
-                    ? JSON.parse(data.output as string)
-                    : data.output;
-                  if (parsed?.action === "created" || parsed?.action === "deleted") {
-                    eventsChanged = true;
-                  }
-                } catch { /* ignore parse errors */ }
+              // 成功写入后立即通知前端局部拉取，不等待 Agent 完整回复结束。
+              if (didCalendarWriteChange(tn, data.output)) {
+                yield { type: "events_changed" };
               }
               continue;
             }
@@ -382,7 +406,7 @@ export class DeepAgentsRuntime implements AgentRuntime {
 
         // for-await 结束后等待 output Promise 终态，避免竞态导致未捕获的 interrupt
         if (!signal?.aborted) {
-          yield* this._settleStreamOutput(eventStream, threadId, eventsChanged);
+          yield* this._settleStreamOutput(eventStream, threadId);
           settled = true;
         }
       } finally {
@@ -434,7 +458,6 @@ export class DeepAgentsRuntime implements AgentRuntime {
   private async *_settleStreamOutput(
     eventStream: any,
     threadId: string,
-    eventsChanged: boolean,
   ): AsyncIterable<AgentStreamEvent> {
     // 1) 等待 output Promise 终态（消费 rejection 避免 unhandledRejection）
     if (eventStream?.output && typeof eventStream.output.then === "function") {
@@ -451,9 +474,6 @@ export class DeepAgentsRuntime implements AgentRuntime {
 
     // 2) 公开 API 明确表示正常完成时直接返回，避免正常请求承担 fallback 延迟
     if (eventStream?.interrupted === false) {
-      if (eventsChanged) {
-        yield { type: "events_changed" };
-      }
       yield { type: "done" };
       return;
     }
@@ -485,9 +505,6 @@ export class DeepAgentsRuntime implements AgentRuntime {
     }
 
     // 6) 兼容缺少 interrupted 公开标志的旧实现
-    if (eventsChanged) {
-      yield { type: "events_changed" };
-    }
     yield { type: "done" };
   }
 

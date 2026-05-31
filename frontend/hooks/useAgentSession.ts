@@ -79,6 +79,29 @@ export const VoiceApproval = {
   },
 };
 
+export interface TtsStreamSink {
+  appendText: (text: string) => void;
+  cancel: () => void;
+}
+
+/** 审批恢复仍属于原始轮次：只有语音发起的轮次需要继续播报。 */
+export function shouldSpeakResume(state: VoiceApprovalState): boolean {
+  return state.voiceTurn;
+}
+
+/** 将可直接处理的 Agent SSE 事件转发给 TTS。finish 由调用方在流正常结束后触发。 */
+export function forwardStreamEventToTts(
+  tts: TtsStreamSink | null,
+  event: AgentStreamEvent,
+): void {
+  if (!tts) return;
+  if (event.type === "message_delta") {
+    tts.appendText(event.text);
+  } else if (event.type === "error") {
+    tts.cancel();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // StreamState — 纯 reducer（可独立测试）
 // ---------------------------------------------------------------------------
@@ -365,9 +388,7 @@ export function useAgentSession(
             }
 
             // 语音轮次：实时送入 TTS（播放状态由 PCM 队列自行管理）
-            if (event.type === "message_delta" && tts) {
-              tts.appendText(event.text);
-            }
+            forwardStreamEventToTts(tts, event);
 
             streamState = reduceStreamState(streamState, event);
             setThreadId(streamState.threadId);
@@ -377,8 +398,6 @@ export function useAgentSession(
             setToolActivities(streamState.toolActivities);
             if (streamState.error) {
               setError(streamState.error);
-              // Agent 错误时取消 TTS（cancel 内部 clear 队列，playing 状态由队列回调管理）
-              if (tts) tts.cancel();
             }
           },
           controller.signal,
@@ -446,6 +465,15 @@ export function useAgentSession(
       let streamState = initialStreamState();
       streamState = { ...streamState, threadId };
       let newInterruptReceived = false;
+      let tts: TtsController | null = null;
+
+      if (shouldSpeakResume(approvalRef.current)) {
+        setVoiceError(null);
+        tts = getTts();
+        // 审批提示可能仍在播放。TtsController 会将恢复后的回复排队，
+        // 等待提示 session 正常结束后再开始新 session。
+        tts.start().catch(() => { /* TTS 失败不阻断审批恢复 */ });
+      }
 
       try {
         await resumeMessage(
@@ -479,6 +507,8 @@ export function useAgentSession(
               return;
             }
 
+            forwardStreamEventToTts(tts, event);
+
             if (event.type === "done") {
               setPendingAction(null);
             }
@@ -496,10 +526,14 @@ export function useAgentSession(
 
         // 日历刷新仅由 events_changed SSE 事件触发，不做无条件刷新
         // reject / error / interrupt 不触发额外刷新
+        if (!controller.signal.aborted && streamState.done && !streamState.error && !newInterruptReceived) {
+          tts?.finish();
+        }
       } catch (err) {
         if (controller.signal.aborted) return;
         const message = err instanceof Error ? err.message : "请求失败";
         setError(message);
+        tts?.cancel();
         if (!newInterruptReceived) {
           setPendingAction(savedPendingAction);
         }

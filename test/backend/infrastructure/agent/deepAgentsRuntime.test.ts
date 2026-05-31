@@ -9,7 +9,9 @@ import {
   DeepAgentsRuntime,
   buildSystemPrompt,
   createQueryEventsTool,
+  didCalendarWriteChange,
   extractInterruptPayload,
+  resolveFinishedToolName,
   DEFAULT_LLM_CONFIG,
 } from "../../../../backend/infrastructure/agent/deepAgentsRuntime";
 import type { CalendarRepository } from "../../../../backend/domain/calendarRepository";
@@ -945,6 +947,64 @@ test("stream emits events_changed after successful create_event tool_finished", 
   assert.ok(ec, "Expected events_changed event after successful create_event");
   const doneEv = events.find((e) => e.type === "done");
   assert.ok(doneEv, "Expected done event");
+});
+
+test("resume emits events_changed immediately when tool-finished has no matching tool-started", async () => {
+  const repo = stubRepo();
+  const stubAgent = {
+    streamEvents: async function* () {
+      yield {
+        method: "tools",
+        params: {
+          data: {
+            event: "tool-finished",
+            tool_call_id: "call-resumed",
+            output: JSON.stringify({ action: "created", event: { title: "审批后创建" } }),
+          },
+        },
+      };
+      yield {
+        method: "messages",
+        params: {
+          data: {
+            event: "message-start",
+            id: "message-after-write",
+          },
+        },
+      };
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.resume(
+    { decision: "approve" },
+    "thread-resumed-write",
+  )) {
+    events.push(ev);
+  }
+
+  assert.deepEqual(events.map((event) => event.type), [
+    "thread",
+    "tool_finished",
+    "events_changed",
+    "done",
+  ]);
+  assert.equal(events[1].tool, "create_event");
+});
+
+test("finished calendar write detection recovers missing tool name from domain result", () => {
+  const output = JSON.stringify({ action: "deleted", deleted: 1 });
+  const toolName = resolveFinishedToolName("", output);
+  assert.equal(toolName, "delete_event");
+  assert.equal(didCalendarWriteChange(toolName, output), true);
+  assert.equal(didCalendarWriteChange("query_events", output), false);
+  assert.equal(didCalendarWriteChange("create_event", JSON.stringify({ action: "rejected" })), false);
 });
 
 test("stream does not emit events_changed after rejected write", async () => {

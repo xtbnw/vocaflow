@@ -6,7 +6,9 @@ import {
   initialStreamState,
   isCalendarTool,
   buildDisplayMessages,
+  forwardStreamEventToTts,
   shouldStopVoice,
+  shouldSpeakResume,
   VoiceApproval,
   type StreamState,
   type ToolActivity,
@@ -610,4 +612,36 @@ test("VoiceApproval: startTurn resets both voiceTurn and prompted", () => {
   assert.equal(s.prompted, false);
   const r2 = VoiceApproval.tryPrompt(s);
   assert.equal(r2.play, true);
+});
+
+// ---------------------------------------------------------------------------
+// Resume TTS forwarding — approve / reject share this policy
+// ---------------------------------------------------------------------------
+
+test("shouldSpeakResume keeps voice-origin approvals audible", () => {
+  assert.equal(shouldSpeakResume(VoiceApproval.startTurn(true)), true);
+  assert.equal(shouldSpeakResume(VoiceApproval.startTurn(false)), false);
+});
+
+test("forwardStreamEventToTts forwards resumed deltas and cancels on stream error", () => {
+  const appended: string[] = [];
+  let canceled = 0;
+  const tts = {
+    appendText(text: string) { appended.push(text); },
+    cancel() { canceled++; },
+  };
+
+  forwardStreamEventToTts(tts, { type: "message_delta", messageId: "a1", text: "审批已通过" });
+  forwardStreamEventToTts(tts, { type: "tool_started", callId: "c1", tool: "create_event", arguments: {} });
+  forwardStreamEventToTts(tts, { type: "error", code: "NETWORK_ERROR", message: "连接中断" });
+
+  assert.deepEqual(appended, ["审批已通过"]);
+  assert.equal(canceled, 1);
+});
+
+test("forwardStreamEventToTts is silent without a voice TTS sink", () => {
+  assert.doesNotThrow(() => {
+    forwardStreamEventToTts(null, { type: "message_delta", messageId: "a1", text: "仅显示文字" });
+    forwardStreamEventToTts(null, { type: "error", code: "NETWORK_ERROR", message: "连接中断" });
+  });
 });

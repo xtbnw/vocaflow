@@ -1,42 +1,62 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { CalendarEvent } from "@/backend/domain/calendarTypes";
 
-interface CalendarEventsContextValue {
-  refreshTrigger: number;
-  triggerRefresh: () => void;
+interface CalendarEventsResponse {
+  events: CalendarEvent[];
 }
 
-const CalendarEventsContext = createContext<CalendarEventsContextValue>({
-  refreshTrigger: 0,
-  triggerRefresh: () => {},
-});
+const CalendarEventsContext = createContext<CalendarEvent[]>([]);
+const CalendarEventsRefreshContext = createContext<() => void>(() => {});
+
+/** Only the latest refresh response may update the shared calendar snapshot. */
+export function shouldApplyCalendarEventsResponse(
+  requestId: number,
+  latestRequestId: number,
+): boolean {
+  return requestId === latestRequestId;
+}
 
 export function CalendarEventsProvider({ children }: { children: React.ReactNode }) {
-  const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const triggerRefresh = useCallback(() => setRefreshTrigger((n) => n + 1), []);
+  const [events, setEvents] = useState<CalendarEvent[]>([]);
+  const latestRequestIdRef = useRef(0);
+
+  const refreshEvents = useCallback(() => {
+    const requestId = ++latestRequestIdRef.current;
+
+    void fetch("/api/events", { cache: "no-store" })
+      .then((res) => {
+        if (!res.ok) throw new Error("日程加载失败");
+        return res.json() as Promise<CalendarEventsResponse>;
+      })
+      .then((data) => {
+        if (shouldApplyCalendarEventsResponse(requestId, latestRequestIdRef.current)) {
+          setEvents(data.events);
+        }
+      })
+      .catch(() => {
+        // Keep the current snapshot. Agent chat and voice state must remain unaffected.
+      });
+  }, []);
+
+  useEffect(() => {
+    refreshEvents();
+  }, [refreshEvents]);
+
   return (
-    <CalendarEventsContext.Provider value={{ refreshTrigger, triggerRefresh }}>
-      {children}
-    </CalendarEventsContext.Provider>
+    <CalendarEventsRefreshContext.Provider value={refreshEvents}>
+      <CalendarEventsContext.Provider value={events}>
+        {children}
+      </CalendarEventsContext.Provider>
+    </CalendarEventsRefreshContext.Provider>
   );
 }
 
 export function useCalendarEventsRefresh() {
-  const { triggerRefresh } = useContext(CalendarEventsContext);
-  return triggerRefresh;
+  return useContext(CalendarEventsRefreshContext);
 }
 
 export function useCalendarEvents() {
-  const { refreshTrigger } = useContext(CalendarEventsContext);
-  const [events, setEvents] = useState<CalendarEvent[]>([]);
-
-  useEffect(() => {
-    fetch("/api/events")
-      .then((res) => res.json())
-      .then((data: { events: CalendarEvent[] }) => setEvents(data.events));
-  }, [refreshTrigger]);
-
-  return events;
+  return useContext(CalendarEventsContext);
 }
