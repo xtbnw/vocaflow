@@ -4,8 +4,6 @@ import {
   Send,
   Mic,
   MicOff,
-  CheckCircle2,
-  XCircle,
   Wrench,
   ChevronUp,
   ChevronDown,
@@ -251,34 +249,6 @@ function MessageBubble({ message }: { message: SessionMessage }) {
         </div>
       );
 
-    case "tool":
-      return (
-        <div className="mb-2 flex justify-start">
-          <div
-            className={`max-w-[85%] rounded-2xl rounded-bl-md px-4 py-2.5 text-sm shadow-sm ${
-              message.success
-                ? "bg-[#e8f5e9]/80 text-[#1c1b1b]"
-                : "bg-[#ffdad6]/60 text-[#ba1a1a]"
-            }`}
-          >
-            <div className="mb-1 flex items-center gap-1.5">
-              {message.success ? (
-                <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
-              ) : (
-                <XCircle className="h-3.5 w-3.5 text-red-500" />
-              )}
-              <span className="text-[10px] font-medium uppercase tracking-widest text-[#49473f]/60">
-                {message.success ? "执行成功" : "执行失败"}
-              </span>
-            </div>
-            <p className="whitespace-pre-line">{message.message}</p>
-            <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[#49473f]/50">
-              <Wrench className="h-3 w-3" />
-              <span>{toolLabel(message.toolName)}</span>
-            </div>
-          </div>
-        </div>
-      );
   }
 }
 

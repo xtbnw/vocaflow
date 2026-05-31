@@ -156,7 +156,7 @@ export class AgentRunner {
       );
 
       if (!result.success) {
-        return { messages, eventsChanged };
+        continue;
       }
 
       eventsChanged ||= WRITE_TOOLS.has(decision.tool);
