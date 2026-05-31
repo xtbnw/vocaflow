@@ -48,7 +48,7 @@ interface StubAgentEventsConfig {
  */
 function createStubAgent(config: StubAgentEventsConfig) {
   let seq = 0;
-  return {
+  const agent = {
     streamEvents: async function* (_input: unknown, _opts?: unknown) {
       const { textChunks = [], toolCalls = [], throwError } = config;
 
@@ -108,7 +108,16 @@ function createStubAgent(config: StubAgentEventsConfig) {
         throw throwError;
       }
     },
-  } as unknown as DeepAgent;
+  };
+
+  const streamEvents = agent.streamEvents.bind(agent);
+  agent.streamEvents = (async (...args: Parameters<typeof streamEvents>) => {
+    const iterator = streamEvents(...args);
+    Object.defineProperty(iterator, "interrupted", { value: false });
+    return iterator;
+  }) as typeof agent.streamEvents;
+
+  return agent as unknown as DeepAgent;
 }
 
 // ---------------------------------------------------------------------------
@@ -252,10 +261,21 @@ test("sseStream handles empty async iterable", async () => {
 
 test("classifyStreamError returns NETWORK_ERROR for fetch/network errors", () => {
   assert.equal(classifyStreamError(new Error("fetch failed")), "NETWORK_ERROR");
+  assert.equal(classifyStreamError(new Error("TypeError: fetch failed")), "NETWORK_ERROR");
   assert.equal(classifyStreamError(new Error("ECONNREFUSED")), "NETWORK_ERROR");
   assert.equal(classifyStreamError(new Error("ENOTFOUND")), "NETWORK_ERROR");
+  assert.equal(classifyStreamError(new Error("ECONNRESET")), "NETWORK_ERROR");
+  assert.equal(classifyStreamError(new Error("ETIMEDOUT")), "NETWORK_ERROR");
+  assert.equal(classifyStreamError(new Error("Connection error.")), "NETWORK_ERROR");
+  assert.equal(classifyStreamError(new Error("socket hang up")), "NETWORK_ERROR");
   assert.equal(classifyStreamError(new Error("network timeout")), "NETWORK_ERROR");
   assert.equal(classifyStreamError(new Error("Request aborted")), "NETWORK_ERROR");
+});
+
+test("classifyStreamError: fetch failed 不误判为 MODEL_ERROR", () => {
+  const code = classifyStreamError(new Error("fetch failed"));
+  assert.notEqual(code, "MODEL_ERROR", "fetch failed 不应归类为模型错误");
+  assert.equal(code, "NETWORK_ERROR", "fetch failed 应归类为网络错误");
 });
 
 test("classifyStreamError returns AUTH_ERROR for 401/403 errors", () => {

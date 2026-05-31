@@ -38,6 +38,7 @@ next-env.d.ts
 # docs
 docs/需求设计/
 docs/页面原型/
+docs/API参考文档/
 
 # todo
 TODO.md

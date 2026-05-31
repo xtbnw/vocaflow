@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { SessionMessage } from "@/backend/domain/sessionTypes";
-import { useAgentSession, isCalendarTool, type ToolActivity } from "@/frontend/hooks/useAgentSession";
+import { useAgentSession, isCalendarTool, shouldStopVoice, type ToolActivity } from "@/frontend/hooks/useAgentSession";
 import { useVoiceInput } from "@/frontend/hooks/useVoiceInput";
 import { useCalendarEventsRefresh } from "@/frontend/hooks/useCalendarEvents";
 import { ActionPreviewPanel } from "./ActionPreviewPanel";
@@ -69,7 +69,7 @@ export function VoiceCommandBar() {
   const hasBlocker = !!pendingAction || isExecutingPending;
 
   useEffect(() => {
-    if (hasBlocker && isListening) {
+    if (shouldStopVoice(hasBlocker, isListening)) {
       stopListening();
     }
   }, [hasBlocker, isListening, stopListening]);

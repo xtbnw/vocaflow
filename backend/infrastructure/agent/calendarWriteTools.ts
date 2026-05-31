@@ -14,7 +14,7 @@ import type { ActionPreview } from "../../app/types/pendingAction";
 import type { ToolReviewInterrupt } from "../../domain/agentRuntime";
 
 // ---------------------------------------------------------------------------
-// Preview builders (reuse logic from WriteActionPreviewHook)
+// Preview builders — 计算审批预览信息（冲突检测等）
 // ---------------------------------------------------------------------------
 
 async function buildCreateEventPreview(

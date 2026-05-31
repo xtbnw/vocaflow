@@ -8,10 +8,12 @@ import Database from "better-sqlite3";
 import {
   DeepAgentsRuntime,
   createQueryEventsTool,
+  extractInterruptPayload,
   DEFAULT_LLM_CONFIG,
 } from "../../../../backend/infrastructure/agent/deepAgentsRuntime";
 import type { CalendarRepository } from "../../../../backend/domain/calendarRepository";
 import type { CalendarEvent } from "../../../../backend/domain/calendarTypes";
+import type { ToolReviewInterrupt } from "../../../../backend/domain/agentRuntime";
 import { QueryEventsArgsSchema } from "../../../../backend/domain/calendarTypes";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { emptyCheckpoint } from "@langchain/langgraph-checkpoint";
@@ -1370,6 +1372,467 @@ test("real LG: delete_event interrupt then approve deletes exactly once", async 
     assert.equal(deleted.length, 1, "Delete after approve");
     assert.equal(deleted[0], "evt-1");
     assert.ok((result.result as string).includes("deleted"));
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// extractInterruptPayload 单元测试
+// ---------------------------------------------------------------------------
+
+test("extractInterruptPayload returns null for non-GraphInterrupt error", () => {
+  const err = new Error("plain error");
+  const result = extractInterruptPayload(err);
+  assert.equal(result, null);
+});
+
+test("extractInterruptPayload returns null for GraphInterrupt without interrupts", () => {
+  const err = new Error("GraphInterrupt") as any;
+  // No interrupts array
+  const result = extractInterruptPayload(err);
+  assert.equal(result, null);
+});
+
+test("extractInterruptPayload returns payload for valid GraphInterrupt", () => {
+  const payload: ToolReviewInterrupt = {
+    kind: "tool_review",
+    action: "create_event",
+    arguments: { title: "test" },
+    preview: { title: "创建日程", summary: "test", items: [] },
+  };
+  const err = new Error("GraphInterrupt") as any;
+  err.interrupts = [{ value: payload }];
+  const result = extractInterruptPayload(err);
+  assert.equal(result?.kind, "tool_review");
+  assert.equal(result?.action, "create_event");
+});
+
+test("extractInterruptPayload returns payload when interrupt array is thrown directly", () => {
+  const payload: ToolReviewInterrupt = {
+    kind: "tool_review",
+    action: "delete_event",
+    arguments: { eventIds: ["evt-direct-array"] },
+    preview: { title: "删除日程", summary: "test", items: [] },
+  };
+
+  const result = extractInterruptPayload([{ id: "interrupt-1", value: payload }]);
+
+  assert.equal(result?.kind, "tool_review");
+  assert.equal(result?.action, "delete_event");
+});
+
+// ---------------------------------------------------------------------------
+// HumanMessage 不被污染
+// ---------------------------------------------------------------------------
+
+test("stream passes user message as clean HumanMessage (no date context injected)", async () => {
+  const repo = stubRepo();
+  let capturedMessages: any[] | undefined;
+
+  const stubAgent = {
+    streamEvents: async function* (input: any) {
+      capturedMessages = input.messages;
+      yield { method: "messages", params: { data: { event: "message-start", id: "m1" } } };
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const userInput = "明天下午有什么安排？";
+  const events: any[] = [];
+  for await (const ev of runtime.stream(userInput, "thread-clean-msg")) {
+    events.push(ev);
+  }
+
+  assert.ok(capturedMessages, "streamEvents 应被调用");
+  assert.equal(capturedMessages!.length, 2, "应有 SystemMessage + HumanMessage 两条");
+
+  // 第一条是 SystemMessage（日期上下文）
+  assert.equal(
+    capturedMessages![0].constructor.name,
+    "SystemMessage",
+    "第一条应为 SystemMessage",
+  );
+
+  // 第二条是 HumanMessage（用户原始输入）
+  assert.equal(
+    capturedMessages![1].constructor.name,
+    "HumanMessage",
+    "第二条应为 HumanMessage",
+  );
+  assert.equal(
+    capturedMessages![1].content,
+    userInput,
+    "HumanMessage.content 应为用户原始输入，未被拼接时间上下文",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// eventStream.output 竞态 stub 测试
+// ---------------------------------------------------------------------------
+
+test("stream: output rejects with GraphInterrupt after iterator ends → emit interrupt, no done", async () => {
+  const repo = stubRepo();
+  const interruptPayload: ToolReviewInterrupt = {
+    kind: "tool_review",
+    action: "create_event",
+    arguments: { title: "竞态测试" },
+    preview: { title: "创建日程", summary: "竞态", items: [] },
+  };
+
+  const graphErr = new Error("GraphInterrupt") as any;
+  graphErr.interrupts = [{ value: interruptPayload }];
+
+  const stubAgent = {
+    streamEvents: async () => {
+      async function* gen() {
+        yield { method: "messages", params: { data: { event: "message-start", id: "m1" } } };
+        // iterator 先结束，不抛异常
+      }
+      const it = gen();
+      // output Promise 在 microtask 中 reject，模拟竞态
+      (it as any).output = new Promise((_, reject) => {
+        queueMicrotask(() => reject(graphErr));
+      });
+      return it;
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.stream("创建竞态测试日程", "thread-out-int")) {
+    events.push(ev);
+  }
+
+  const interruptEv = events.find((e: any) => e.type === "interrupt");
+  assert.ok(interruptEv, "应从 output rejection 中提取 interrupt");
+  assert.equal(interruptEv.review.action, "create_event");
+
+  const doneEv = events.find((e: any) => e.type === "done");
+  assert.equal(doneEv, undefined, "interrupt 时不应有 done");
+});
+
+test("stream: iterator throws interrupt array directly → emit interrupt, no done", async () => {
+  const repo = stubRepo();
+  const interruptPayload: ToolReviewInterrupt = {
+    kind: "tool_review",
+    action: "create_event",
+    arguments: { title: "数组竞态测试" },
+    preview: { title: "创建日程", summary: "test", items: [] },
+  };
+  const stubAgent = {
+    streamEvents: async () => {
+      async function* gen() {
+        throw [{ id: "interrupt-direct", value: interruptPayload }];
+      }
+      return gen();
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.stream("test", "thread-direct-array")) {
+    events.push(ev);
+  }
+
+  assert.equal(events.find((e: any) => e.type === "interrupt")?.review.action, "create_event");
+  assert.equal(events.find((e: any) => e.type === "done"), undefined);
+});
+
+test("stream: consumes rejected v3 toolCalls projection output", async () => {
+  const repo = stubRepo();
+  const interruptPayload: ToolReviewInterrupt = {
+    kind: "tool_review",
+    action: "delete_event",
+    arguments: { eventIds: ["evt-projection"] },
+    preview: { title: "删除日程", summary: "test", items: [] },
+  };
+  const stubAgent = {
+    streamEvents: async () => {
+      async function* protocolEvents() {
+        yield { method: "messages", params: { data: { event: "message-start", id: "m1" } } };
+      }
+      async function* toolCalls() {
+        yield { output: Promise.reject([{ id: "projection-int", value: interruptPayload }]) };
+      }
+      const it = protocolEvents();
+      (it as any).output = Promise.resolve(undefined);
+      (it as any).interrupted = true;
+      (it as any).interrupts = [{ interruptId: "projection-int", payload: interruptPayload }];
+      (it as any).toolCalls = toolCalls();
+      return it;
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.stream("test", "thread-projection")) {
+    events.push(ev);
+  }
+
+  assert.equal(events.find((e: any) => e.type === "interrupt")?.review.action, "delete_event");
+  assert.equal(events.find((e: any) => e.type === "done"), undefined);
+});
+
+test("stream: output rejects with network error → emit error", async () => {
+  const repo = stubRepo();
+  const netErr = new Error("fetch failed: ECONNREFUSED");
+
+  const stubAgent = {
+    streamEvents: async () => {
+      async function* gen() {
+        yield { method: "messages", params: { data: { event: "message-start", id: "m1" } } };
+      }
+      const it = gen();
+      (it as any).output = Promise.reject(netErr);
+      // 防止 mocha/node 报告 unhandledRejection（测试框架会捕获但明确 suppress）
+      (it as any).output.catch(() => {});
+      return it;
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.stream("test", "thread-net-err")) {
+    events.push(ev);
+  }
+
+  const errEv = events.find((e: any) => e.type === "error");
+  assert.ok(errEv, "应输出 error 事件");
+  assert.equal(errEv.code, "NETWORK_ERROR");
+});
+
+test("stream: output resolves normally → emit done", async () => {
+  const repo = stubRepo();
+  let abortCalls = 0;
+  const stubAgent = {
+    streamEvents: async () => {
+      async function* gen() {
+        yield { method: "messages", params: { data: { event: "message-start", id: "m1" } } };
+      }
+      const it = gen();
+      (it as any).output = Promise.resolve(undefined);
+      (it as any).interrupted = false;
+      (it as any).abort = async () => { abortCalls += 1; };
+      return it;
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const start = Date.now();
+  const events: any[] = [];
+  for await (const ev of runtime.stream("test", "thread-normal")) {
+    events.push(ev);
+  }
+  const elapsed = Date.now() - start;
+
+  const doneEv = events.find((e: any) => e.type === "done");
+  assert.ok(doneEv, "正常结束应有 done 事件");
+  const errEv = events.find((e: any) => e.type === "error");
+  assert.equal(errEv, undefined, "正常结束不应有 error");
+  const intEv = events.find((e: any) => e.type === "interrupt");
+  assert.equal(intEv, undefined, "正常结束不应有 interrupt");
+  assert.equal(abortCalls, 0, "正常结束后不应调用 abort");
+  assert.ok(elapsed < 100, `公开 API 正常完成时不应轮询 checkpoint，实际耗时 ${elapsed}ms`);
+});
+
+test("stream: interrupted true with public payload → emit interrupt, no done", async () => {
+  const repo = stubRepo();
+  const interruptPayload: ToolReviewInterrupt = {
+    kind: "tool_review",
+    action: "delete_event",
+    arguments: { eventIds: ["evt-public"] },
+    preview: { title: "删除日程", summary: "test", items: [] },
+  };
+  const stubAgent = {
+    streamEvents: async () => {
+      async function* gen() {
+        yield { method: "messages", params: { data: { event: "message-start", id: "m1" } } };
+      }
+      const it = gen();
+      (it as any).output = Promise.resolve(undefined);
+      (it as any).interrupted = true;
+      (it as any).interrupts = [{ interruptId: "public-int", payload: interruptPayload }];
+      return it;
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.stream("test", "thread-public-int")) {
+    events.push(ev);
+  }
+
+  assert.equal(events.find((e: any) => e.type === "interrupt")?.review.action, "delete_event");
+  assert.equal(events.find((e: any) => e.type === "done"), undefined);
+});
+
+test("stream: interrupted true without supported payload → emit STREAM_ERROR, no done", async () => {
+  const repo = stubRepo();
+  const stubAgent = {
+    streamEvents: async () => {
+      async function* gen() {
+        yield { method: "messages", params: { data: { event: "message-start", id: "m1" } } };
+      }
+      const it = gen();
+      (it as any).output = Promise.resolve(undefined);
+      (it as any).interrupted = true;
+      (it as any).interrupts = [{ interruptId: "unsupported-int", payload: { kind: "unsupported_interrupt" } }];
+      return it;
+    },
+  } as any;
+
+  const runtime = new DeepAgentsRuntime(repo, {
+    createLLM: () => stubAgent as any,
+    createAgent: () => stubAgent as any,
+    getCheckpointer: () => stubCheckpointer(),
+  });
+
+  const events: any[] = [];
+  for await (const ev of runtime.stream("test", "thread-unsupported-int")) {
+    events.push(ev);
+  }
+
+  const error = events.find((e: any) => e.type === "error");
+  assert.equal(error?.code, "STREAM_ERROR");
+  assert.match(error?.message ?? "", /without a supported review payload/);
+  assert.equal(events.find((e: any) => e.type === "done"), undefined);
+});
+
+test("stream: output resolves but checkpoint has interrupt → emit interrupt via fallback", async () => {
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-cp-fallback-int";
+
+  const interruptPayload: ToolReviewInterrupt = {
+    kind: "tool_review",
+    action: "delete_event",
+    arguments: { eventIds: ["evt-1"] },
+    preview: { title: "删除日程", summary: "test", items: [{ label: "数量", value: "1" }] },
+  };
+
+  // 预写入包含 interrupt 的 checkpoint
+  const config = { configurable: { thread_id: threadId } };
+  const cp = testCheckpoint();
+  (cp as any).channel_values = {
+    __interrupt__: [{ value: interruptPayload }],
+  };
+  await checkpointer.put(config, cp, testMetadata());
+
+  try {
+    const repo = stubRepo();
+    const stubAgent = {
+      streamEvents: async () => {
+        async function* gen() {
+          yield { method: "messages", params: { data: { event: "message-start", id: "m1" } } };
+        }
+        const it = gen();
+        (it as any).output = Promise.resolve(undefined);
+        return it;
+      },
+    } as any;
+
+    const runtime = new DeepAgentsRuntime(repo, {
+      createLLM: () => stubAgent as any,
+      createAgent: () => stubAgent as any,
+      getCheckpointer: () => checkpointer,
+    });
+
+    const events: any[] = [];
+    for await (const ev of runtime.stream("test", threadId)) {
+      events.push(ev);
+    }
+
+    const interruptEv = events.find((e: any) => e.type === "interrupt");
+    assert.ok(interruptEv, "checkpoint fallback 应捕获 interrupt");
+    assert.equal(interruptEv.review.action, "delete_event");
+
+    const doneEv = events.find((e: any) => e.type === "done");
+    assert.equal(doneEv, undefined, "interrupt 时不应有 done");
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stream: checkpoint poll exits after bound → emit done (no infinite wait)", async () => {
+  const { checkpointer, db, dir } = createTempCheckpointer();
+  const threadId = "thread-cp-no-int";
+
+  try {
+    const repo = stubRepo();
+    const stubAgent = {
+      streamEvents: async () => {
+        async function* gen() {
+          yield { method: "messages", params: { data: { event: "message-start", id: "m1" } } };
+        }
+        const it = gen();
+        (it as any).output = Promise.resolve(undefined);
+        return it;
+      },
+    } as any;
+
+    const runtime = new DeepAgentsRuntime(repo, {
+      createLLM: () => stubAgent as any,
+      createAgent: () => stubAgent as any,
+      getCheckpointer: () => checkpointer,
+    });
+
+    const start = Date.now();
+    const events: any[] = [];
+    for await (const ev of runtime.stream("test", threadId)) {
+      events.push(ev);
+    }
+    const elapsed = Date.now() - start;
+
+    // 不应有 interrupt（checkpoint 中无数据）
+    const interruptEv = events.find((e: any) => e.type === "interrupt");
+    assert.equal(interruptEv, undefined, "无 interrupt 时不应误报");
+
+    const doneEv = events.find((e: any) => e.type === "done");
+    assert.ok(doneEv, "轮询上限后应正常结束");
+
+    // 由于 _pollPendingInterrupt 在首次命中时就返回（checkpoint 为空，立即 null），
+    // 不应有 500ms 的上限等待。如果首次命中即返回 null，elapsed 应 < 200ms
+    assert.ok(
+      elapsed < 1000,
+      `轮询应在有界时间内退出，实际耗时 ${elapsed}ms`,
+    );
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

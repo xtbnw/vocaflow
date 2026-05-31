@@ -1,7 +1,8 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
-import { HumanMessage } from "langchain";
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import type { BaseMessage } from "@langchain/core/messages";
 import { ChatDeepSeek } from "@langchain/deepseek";
 import { createDeepAgent } from "deepagents";
 import type { DeepAgent } from "deepagents";
@@ -81,6 +82,50 @@ function createDefaultCheckpointer(): SqliteSaver {
  * 通过 Deps 注入支持单元测试（测试替身），默认走正式链路。
  * 通过 SqliteSaver checkpoint 持久化 thread 状态，支持同一 threadId 延续上下文。
  */
+/** 构造时生成 system prompt，嵌入当前日期与 Asia/Shanghai 时区。
+ *
+ *  限制：system prompt 在 DeepAgent 构造时固化。对于长期运行的服务器进程，
+ *  prompt 中的日期可能偏离实际日期，重启进程即可刷新。
+ *  相对时间解析准确性依赖 LLM 自身对日期上下文的理解，
+ *  stream() 中额外注入的当前时间可提供参考。 */
+function buildSystemPrompt(): string {
+  const now = new Date();
+  const dateStr = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "long",
+  }).format(now);
+
+  return (
+    `你是一个日历语音助手。当前日期：${dateStr}，时区：Asia/Shanghai (UTC+8)。` +
+    "你可以通过 query_events 工具查询用户的日程，" +
+    "通过 create_event 工具创建新日程，通过 delete_event 工具删除日程。" +
+    "当用户询问日程安排、空闲时间或需要查看日历时，请先调用 query_events。" +
+    "当用户明确要求创建日程（如「帮我创建」「添加日程」「安排会议」）时，你必须直接调用 create_event 工具，不要先回复文本确认。" +
+    "当用户明确要求删除日程（如「帮我删除」「取消日程」「移除」）时，你必须调用 delete_event 工具；" +
+    "如果不知道要删除日程的 eventId，先调用 query_events 查询后再调用 delete_event。" +
+    "创建和删除操作需要用户确认后才能执行（系统会自动弹出确认对话框）。" +
+    "用中文回复用户，保持回复简洁清晰。"
+  );
+}
+
+/** 格式化当前本地时间，每次请求动态计算。 */
+function formatCurrentDateTime(): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date());
+}
+
 export class DeepAgentsRuntime implements AgentRuntime {
   readonly kind = "deepagents";
   readonly model = "deepseek-v4-pro";
@@ -106,8 +151,8 @@ export class DeepAgentsRuntime implements AgentRuntime {
     this._agent = deps?.createAgent
       ? deps.createAgent(llm, tools)
       : // 接受 Deep Agents 默认内置 general-purpose subagent 和 task 工具，
-        // 不注册自定义 subagent。内置 subagent 与主 agent 共享同一工具集，
-        // 仅能调用 query_events，不会获得额外宿主访问能力。
+        // 不注册自定义 subagent。内置 subagent 与主 agent 共享同一工具集
+        // （query_events、create_event、delete_event），不会获得额外宿主访问能力。
         createDeepAgent({
           model: llm,
           // createDeepAgent 的 tools 参数期望与 LangChain DynamicStructuredTool 精确匹配；
@@ -115,12 +160,7 @@ export class DeepAgentsRuntime implements AgentRuntime {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           tools: tools as any,
           checkpointer: this._checkpointer,
-          systemPrompt:
-            "你是一个日历语音助手。你可以通过 query_events 工具查询用户的日程，" +
-            "通过 create_event 工具创建新日程，通过 delete_event 工具删除日程。" +
-            "当用户询问日程安排、空闲时间或需要查看日历时，请先调用 query_events。" +
-            "创建和删除操作需要用户确认后才能执行。" +
-            "用中文回复用户，保持回复简洁清晰。",
+          systemPrompt: buildSystemPrompt(),
         });
   }
 
@@ -141,8 +181,10 @@ export class DeepAgentsRuntime implements AgentRuntime {
 
   async *stream(message: string, threadId: string, signal?: AbortSignal): AsyncIterable<AgentStreamEvent> {
     yield { type: "thread", threadId };
+    // 当前时间作为独立 SystemMessage 注入，不污染 HumanMessage 原始内容
+    const dateContext = `当前本地时间：${formatCurrentDateTime()}，时区：Asia/Shanghai (UTC+8)`;
     yield* this._runStream(
-      { messages: [new HumanMessage(message)] },
+      { messages: [new SystemMessage(dateContext), new HumanMessage(message)] },
       threadId,
       signal,
     );
@@ -159,7 +201,7 @@ export class DeepAgentsRuntime implements AgentRuntime {
 
   /** 统一的事件流驱动，支持普通输入和 Command resume。 */
   private async *_runStream(
-    input: { messages: HumanMessage[] } | Command,
+    input: { messages: BaseMessage[] } | Command,
     threadId: string,
     signal?: AbortSignal,
   ): AsyncIterable<AgentStreamEvent> {
@@ -167,8 +209,9 @@ export class DeepAgentsRuntime implements AgentRuntime {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let eventStream: any = undefined;
-    let completed = false;
+    let toolCallsDrain: Promise<void> | undefined;
     let eventsChanged = false;
+    let settled = false;
 
     try {
       eventStream = await this._agent.streamEvents(input, {
@@ -176,6 +219,7 @@ export class DeepAgentsRuntime implements AgentRuntime {
         version: "v3",
         ...(signal ? { signal } : {}),
       });
+      toolCallsDrain = consumeToolCallOutputs(eventStream?.toolCalls);
 
       if (signal?.aborted) {
         try { await eventStream.abort?.(new Error("Client disconnected")); } catch {}
@@ -268,54 +312,128 @@ export class DeepAgentsRuntime implements AgentRuntime {
           }
         }
 
-        // for-await 正常结束：检查 pending interrupt 再决定发送 done 还是 interrupt
+        // for-await 结束后等待 output Promise 终态，避免竞态导致未捕获的 interrupt
         if (!signal?.aborted) {
-          const review = await this._readPendingInterrupt(threadId);
-          if (review) {
-            yield { type: "interrupt", review };
-            return;
-          }
-          completed = true;
-          if (eventsChanged) {
-            yield { type: "events_changed" };
-          }
-          yield { type: "done" };
+          yield* this._settleStreamOutput(eventStream, threadId, eventsChanged);
+          settled = true;
         }
       } finally {
         signal?.removeEventListener("abort", onAbort);
       }
     } catch (err) {
-      // 捕获 interrupt() 抛出的 GraphInterrupt，提取 review payload
-      if (isGraphInterrupt(err)) {
-        const interrupts = (err as unknown as { interrupts?: Array<{ value: unknown }> }).interrupts;
-        if (interrupts && interrupts.length > 0) {
-          const value = interrupts[0].value;
-          if (value && typeof value === "object" && (value as Record<string, unknown>).kind === "tool_review") {
-            yield { type: "interrupt", review: value as ToolReviewInterrupt };
+      // 捕获 streamEvents 初始化失败或 output rejection 中抛出的异常
+      if (!signal?.aborted) {
+        // 优先检查是否为 GraphInterrupt
+        const interruptPayload = extractInterruptPayload(err);
+        if (interruptPayload) {
+          yield { type: "interrupt", review: interruptPayload };
+          settled = true;
+          return;
+        }
+
+        // 仅 GraphInterrupt 形态可能需要等待 checkpoint 延迟写入。
+        // 普通网络、鉴权或模型异常直接分类，避免无意义的 500ms 尾延迟。
+        if (hasInterruptShape(err)) {
+          const review = await this._pollPendingInterrupt(threadId);
+          if (review) {
+            yield { type: "interrupt", review };
+            settled = true;
             return;
           }
         }
-      }
 
-      // GraphInterrupt 可能被内部捕获：尝试从 checkpointer 读取
-      const review = await this._readPendingInterrupt(threadId);
-      if (review) {
-        yield { type: "interrupt", review };
-        return;
-      }
-
-      if (!signal?.aborted) {
         yield {
           type: "error",
           code: classifyStreamError(err),
           message: err instanceof Error ? err.message : String(err),
         };
+        settled = true;
       }
     } finally {
-      if (!completed && eventStream && typeof eventStream.abort === "function") {
+      if (!settled && eventStream && typeof eventStream.abort === "function") {
         try { await eventStream.abort(new Error("Client disconnected")); } catch {}
       }
+      await toolCallsDrain;
     }
+  }
+
+  /**
+   * 等待 eventStream.output 终态，检查 interrupted 公开 API，
+   * 必要时通过 checkpoint 轮询捕获延迟写入的 interrupt。
+   * 优先使用公开 API，仅在公开 API 不足时回退到 bounded checkpoint 轮询。
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async *_settleStreamOutput(
+    eventStream: any,
+    threadId: string,
+    eventsChanged: boolean,
+  ): AsyncIterable<AgentStreamEvent> {
+    // 1) 等待 output Promise 终态（消费 rejection 避免 unhandledRejection）
+    if (eventStream?.output && typeof eventStream.output.then === "function") {
+      try {
+        await eventStream.output;
+      } catch (outputErr) {
+        // output rejection 中可能携带 GraphInterrupt
+        const payload = extractInterruptPayload(outputErr);
+        if (payload) throw outputErr; // 重新抛出让外层 catch 处理
+        // 非 interrupt 错误也抛出让外层分类
+        throw outputErr;
+      }
+    }
+
+    // 2) 公开 API 明确表示正常完成时直接返回，避免正常请求承担 fallback 延迟
+    if (eventStream?.interrupted === false) {
+      if (eventsChanged) {
+        yield { type: "events_changed" };
+      }
+      yield { type: "done" };
+      return;
+    }
+
+    // 3) 公开 API 表示中断时优先读取 payload
+    if (eventStream?.interrupted === true) {
+      const payload = extractInterruptsPayload(eventStream?.interrupts);
+      if (payload) {
+        yield { type: "interrupt", review: payload };
+        return;
+      }
+    }
+
+    // 4) 仅在旧实现缺少公开 interrupted 标志，或 payload 延迟可见时轮询 checkpoint
+    const review = await this._pollPendingInterrupt(threadId);
+    if (review) {
+      yield { type: "interrupt", review };
+      return;
+    }
+
+    // 5) 未知中断不得伪装为成功完成
+    if (eventStream?.interrupted === true) {
+      yield {
+        type: "error",
+        code: "STREAM_ERROR",
+        message: "Agent interrupted without a supported review payload",
+      };
+      return;
+    }
+
+    // 6) 兼容缺少 interrupted 公开标志的旧实现
+    if (eventsChanged) {
+      yield { type: "events_changed" };
+    }
+    yield { type: "done" };
+  }
+
+  /** 有上限的 checkpoint 轮询：最多 10 次，每次 50ms，总计 500ms。 */
+  private async _pollPendingInterrupt(threadId: string): Promise<ToolReviewInterrupt | null> {
+    const review = await this._readPendingInterrupt(threadId);
+    if (review) return review;
+
+    for (let i = 0; i < 10; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const r = await this._readPendingInterrupt(threadId);
+      if (r) return r;
+    }
+    return null;
   }
 
   /** 从 checkpointer 读取 pending interrupt，不存在时返回 null。 */
@@ -342,6 +460,75 @@ export class DeepAgentsRuntime implements AgentRuntime {
   }
 }
 
+/** 从异常中提取 ToolReviewInterrupt payload，不满足时返回 null。 */
+export function extractInterruptPayload(err: unknown): ToolReviewInterrupt | null {
+  if (Array.isArray(err)) return extractInterruptsPayload(err);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyErr = err as any;
+
+  // 优先通过 LangGraph isGraphInterrupt 判定
+  if (isGraphInterrupt(err)) {
+    const payload = extractInterruptsPayload(anyErr.interrupts);
+    if (payload) return payload;
+  }
+
+  // duck-type fallback：某些环境下 interrupt 可能以普通 Error + interrupts 属性方式抛出
+  if (anyErr) return extractInterruptsPayload(anyErr.interrupts);
+
+  return null;
+}
+
+/** 从 LangGraph interrupts 数组中提取首个受支持的审批 payload。 */
+function extractInterruptsPayload(interrupts: unknown): ToolReviewInterrupt | null {
+  if (!Array.isArray(interrupts)) return null;
+
+  for (const interrupt of interrupts) {
+    const value = interrupt && typeof interrupt === "object"
+      ? ((interrupt as { payload?: unknown }).payload ?? (interrupt as { value?: unknown }).value)
+      : undefined;
+    if (value && typeof value === "object" && (value as Record<string, unknown>).kind === "tool_review") {
+      return value as ToolReviewInterrupt;
+    }
+  }
+
+  return null;
+}
+
+/** 判断异常是否可能是尚未携带可读 payload 的 LangGraph interrupt。 */
+function hasInterruptShape(err: unknown): boolean {
+  if (Array.isArray(err)) return true;
+  if (isGraphInterrupt(err)) return true;
+  return Boolean(
+    err &&
+    typeof err === "object" &&
+    Array.isArray((err as { interrupts?: unknown }).interrupts),
+  );
+}
+
+/**
+ * DeepAgent v3 为工具调用额外提供 `toolCalls` 投影。
+ * interrupt 会让投影中的 `call.output` reject；即使业务只消费 protocol events，
+ * 也必须挂接 rejection handler，避免 Node 将其报告为 unhandledRejection。
+ */
+async function consumeToolCallOutputs(toolCalls: unknown): Promise<void> {
+  if (
+    !toolCalls ||
+    typeof toolCalls !== "object" ||
+    !(Symbol.asyncIterator in toolCalls)
+  ) {
+    return;
+  }
+
+  try {
+    for await (const call of toolCalls as AsyncIterable<{ output?: Promise<unknown> }>) {
+      void call.output?.catch(() => undefined);
+    }
+  } catch {
+    // protocol event stream owns application-visible error reporting
+  }
+}
+
 /** 将 streamEvents 抛出的底层异常映射为稳定错误码。 */
 export function classifyStreamError(error: unknown): string {
   if (!(error instanceof Error)) {
@@ -356,7 +543,10 @@ export function classifyStreamError(error: unknown): string {
     msg.includes("econnreset") ||
     msg.includes("network") ||
     msg.includes("timeout") ||
-    msg.includes("abort")
+    msg.includes("etimedout") ||
+    msg.includes("abort") ||
+    msg.includes("connection error") ||
+    msg.includes("socket hang up")
   ) {
     return "NETWORK_ERROR";
   }
