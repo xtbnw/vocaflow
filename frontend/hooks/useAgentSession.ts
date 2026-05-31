@@ -8,6 +8,14 @@ import {
   streamMessage,
   resumeMessage,
 } from "@/frontend/api/agentClient";
+import { TtsController } from "@/frontend/infrastructure/tts/ttsController";
+import { createPcmPlaybackQueue } from "@/frontend/infrastructure/tts/pcmPlayer";
+
+// ---------------------------------------------------------------------------
+// SubmitSource
+// ---------------------------------------------------------------------------
+
+export type SubmitSource = "text" | "voice";
 
 // ---------------------------------------------------------------------------
 // ToolActivity — 工具调用生命周期状态
@@ -167,10 +175,13 @@ export interface AgentSessionState {
   isSubmitting: boolean;
   isExecutingPending: boolean;
   error: string | null;
-  submitText: (text: string) => Promise<void>;
+  voiceError: string | null;
+  isTtsPlaying: boolean;
+  submitText: (text: string, source?: SubmitSource) => Promise<void>;
   confirmPending: () => Promise<void>;
   cancelPending: () => Promise<void>;
   clearSession: () => void;
+  resumeAudioContext: () => Promise<void>;
 }
 
 export function useAgentSession(
@@ -183,24 +194,46 @@ export function useAgentSession(
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isExecutingPending, setIsExecutingPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [isTtsPlaying, setIsTtsPlaying] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
+  const ttsRef = useRef<TtsController | null>(null);
 
   // 同步追踪最新 messages，submitText 中需要非异步快照避免 React 批量更新竞态
   const messagesRef = useRef<SessionMessage[]>([]);
   messagesRef.current = messages;
 
-  // 组件卸载时终止所有进行中的流
+  /** 懒加载 TtsController，同一 hook 实例复用 */
+  function getTts(): TtsController {
+    if (!ttsRef.current) {
+      const queue = createPcmPlaybackQueue(
+        undefined,
+        (playing) => setIsTtsPlaying(playing),
+      );
+      ttsRef.current = new TtsController(
+        queue,
+        (msg) => setVoiceError(msg),
+      );
+    }
+    return ttsRef.current;
+  }
+
+  // 组件卸载时终止所有进行中的流并释放 TTS
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+      ttsRef.current?.dispose();
     };
   }, []);
 
   const submitText = useCallback(
-    async (text: string) => {
+    async (text: string, source: SubmitSource = "text") => {
       // 终止上一轮残留请求（含进行中的 resume）
       abortRef.current?.abort();
+      if (source === "voice") {
+        ttsRef.current?.cancel();
+      }
 
       const controller = new AbortController();
       abortRef.current = controller;
@@ -208,6 +241,15 @@ export function useAgentSession(
       setIsSubmitting(true);
       setIsExecutingPending(false);
       setError(null);
+
+      // 语音轮次：启动 TTS session
+      let tts: TtsController | null = null;
+      if (source === "voice") {
+        setVoiceError(null);
+        tts = getTts();
+        // 不阻塞文字提交，仅通知 begin
+        tts.start().catch(() => { /* TTS 失败不阻断文字对话 */ });
+      }
 
       const optimisticUser: SessionMessage = {
         kind: "user",
@@ -249,6 +291,11 @@ export function useAgentSession(
               return;
             }
 
+            // 语音轮次：实时送入 TTS（播放状态由 PCM 队列自行管理）
+            if (event.type === "message_delta" && tts) {
+              tts.appendText(event.text);
+            }
+
             streamState = reduceStreamState(streamState, event);
             setThreadId(streamState.threadId);
             setMessages(
@@ -257,20 +304,28 @@ export function useAgentSession(
             setToolActivities(streamState.toolActivities);
             if (streamState.error) {
               setError(streamState.error);
+              // Agent 错误时取消 TTS（cancel 内部 clear 队列，playing 状态由队列回调管理）
+              if (tts) tts.cancel();
             }
           },
           controller.signal,
         );
 
         // 流正常结束（未 abort）
-        if (!controller.signal.aborted && streamState.done && !streamState.error) {
-          onEventsChanged?.();
+        if (!controller.signal.aborted) {
+          if (streamState.done && !streamState.error) {
+            onEventsChanged?.();
+            // 语音轮次：通知 TTS 文本发送完毕
+            if (tts) tts.finish();
+          }
         }
       } catch (err) {
         // abort 触发的异常直接忽略，不覆盖清理后的 UI
         if (controller.signal.aborted) return;
         const message = err instanceof Error ? err.message : "请求失败";
         setError(message);
+        // 异常时取消 TTS（cancel 内部 clear 队列，playing 状态由队列回调管理）
+        if (tts) tts.cancel();
       } finally {
         // 仅当 controller 仍是当前请求时才清理，避免覆盖新请求状态
         if (abortRef.current === controller) {
@@ -380,6 +435,7 @@ export function useAgentSession(
     setIsSubmitting(false);
     setIsExecutingPending(false);
     messagesRef.current = [];
+    ttsRef.current?.cancel();
     if (threadId) {
       void fetch(`/api/session?id=${encodeURIComponent(threadId)}`, { method: "DELETE" });
     }
@@ -388,7 +444,13 @@ export function useAgentSession(
     setToolActivities([]);
     setPendingAction(null);
     setError(null);
+    setVoiceError(null);
+    setIsTtsPlaying(false);
   }, [threadId]);
+
+  const resumeAudioContext = useCallback(async () => {
+    await getTts().ensureContext();
+  }, []);
 
   return {
     threadId,
@@ -398,9 +460,12 @@ export function useAgentSession(
     isSubmitting,
     isExecutingPending,
     error,
+    voiceError,
+    isTtsPlaying,
     submitText,
     confirmPending,
     cancelPending,
     clearSession,
+    resumeAudioContext,
   };
 }

@@ -4,6 +4,7 @@ import {
   Send,
   Mic,
   MicOff,
+  Volume2,
   Wrench,
   ChevronUp,
   ChevronDown,
@@ -34,10 +35,13 @@ export function VoiceCommandBar() {
     isSubmitting,
     isExecutingPending,
     error,
+    voiceError,
+    isTtsPlaying,
     submitText,
     confirmPending,
     cancelPending,
     clearSession,
+    resumeAudioContext,
   } = useAgentSession(triggerRefresh);
 
   const {
@@ -66,6 +70,20 @@ export function VoiceCommandBar() {
     await submitText(text);
   };
 
+  const handleClearSession = () => {
+    clearSession();
+    setCollapsed(true);
+  };
+
+  const handleMicClick = async () => {
+    if (hasBlocker) return;
+    // 在用户手势链路中恢复 AudioContext
+    if (voiceSupported) {
+      try { await resumeAudioContext(); } catch { /* 浏览器不支持 AudioContext 时忽略 */ }
+    }
+    toggleListening();
+  };
+
   const hasBlocker = !!pendingAction || isExecutingPending;
 
   useEffect(() => {
@@ -73,11 +91,6 @@ export function VoiceCommandBar() {
       stopListening();
     }
   }, [hasBlocker, isListening, stopListening]);
-
-  const handleClearSession = () => {
-    clearSession();
-    setCollapsed(true);
-  };
 
   const hasMessages = messages.length > 0;
   const hasToolActivities = toolActivities.length > 0;
@@ -112,6 +125,13 @@ export function VoiceCommandBar() {
                   <div className="mt-2 flex items-center gap-2 rounded-xl bg-[#ffdad6]/60 px-4 py-2.5 text-sm text-[#ba1a1a]">
                     <AlertTriangle className="h-4 w-4 shrink-0" />
                     <span>{error}</span>
+                  </div>
+                )}
+
+                {!error && voiceError && (
+                  <div className="mt-2 flex items-center gap-2 rounded-xl bg-[#fff9e6]/80 px-4 py-2.5 text-xs text-[#625f50]">
+                    <Volume2 className="h-3.5 w-3.5 shrink-0" />
+                    <span>{voiceError}</span>
                   </div>
                 )}
               </div>
@@ -206,7 +226,7 @@ export function VoiceCommandBar() {
                 : "vf-glass cursor-not-allowed border-white/30 text-[#49473f]/30"
           }`}
           disabled={!voiceSupported || hasBlocker}
-          onClick={hasBlocker ? undefined : toggleListening}
+          onClick={hasBlocker ? undefined : handleMicClick}
           title={
             hasBlocker
               ? "请先确认当前操作"
@@ -217,7 +237,9 @@ export function VoiceCommandBar() {
                 : "浏览器不支持语音识别"
           }
         >
-          {voiceSupported ? (
+          {isTtsPlaying ? (
+            <Volume2 className="h-5 w-5 text-[#2e7d32] animate-pulse" />
+          ) : voiceSupported ? (
             <Mic className="h-5 w-5" />
           ) : (
             <MicOff className="h-5 w-5" />

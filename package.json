@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "npx tsx --test test/backend/**/*.test.ts test/scripts/**/*.test.ts",
+    "test": "npx tsx --test test/backend/**/*.test.ts test/scripts/**/*.test.ts test/frontend/**/*.test.ts",
     "test:integration": "npx tsx --test test/integration/**/*.test.ts",
     "voice:gateway": "tsx scripts/voice-gateway/server.ts"
   },

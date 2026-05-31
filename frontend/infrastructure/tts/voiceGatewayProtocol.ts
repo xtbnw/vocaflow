@@ -33,6 +33,10 @@ export function serializeServerMessage(msg: VoiceGatewayServerMessage): string {
   return JSON.stringify(msg);
 }
 
+export function parseServerMessage(data: unknown): VoiceGatewayServerMessage {
+  return voiceGatewayServerMessageSchema.parse(data);
+}
+
 /** 检查 Origin 是否在允许列表中。Node 会将 header 名规范化为小写。 */
 export function isOriginAllowed(origin: string | undefined, allowedOrigins: string[]): boolean {
   // 允许缺失 Origin（如原生 ws 客户端直连）；浏览器来源须匹配白名单
